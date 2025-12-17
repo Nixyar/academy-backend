@@ -93,6 +93,7 @@ Use Row Level Security policies as needed; the API uses the service role key for
 - Frontend signs in via Supabase Auth (email/password or Google provider) and receives `access_token` + `refresh_token`.
 - Frontend calls `POST /auth/session` to store both tokens in httpOnly cookies.
 - Subsequent authenticated calls include cookies; `/me` verifies the access token via JWKS and manages the profile row.
+- If an authenticated request returns `401`, the frontend should call `POST /auth/refresh` to rotate the cookies using the stored refresh token.
 - `POST /auth/logout` removes cookies and ends the session on the API side.
 
 ## Deploy checklist (quick)
