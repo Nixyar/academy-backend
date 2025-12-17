@@ -38,19 +38,19 @@ npm run dev
 The API will start on `PORT` (defaults to `3000` in `.env.example`).
 
 ## API endpoints
-- `GET /health` → `{ ok: true }` (for uptime checks).
-- `POST /auth/session` with body `{ access_token, refresh_token }`
+- `GET /api/health` → `{ ok: true }` (for uptime checks).
+- `POST /api/auth/session` with body `{ access_token, refresh_token }`
   - Saves `sb_access_token` (~1h) and `sb_refresh_token` (~30d) as httpOnly cookies
     (`sameSite=lax`, `secure` depends on `COOKIE_SECURE/NODE_ENV`).
   - Response: `{ ok: true }`.
-- `POST /auth/refresh`
+- `POST /api/auth/refresh`
   - Uses `sb_refresh_token` cookie to refresh the Supabase session.
   - Overwrites both cookies with new tokens on success.
   - Response: `{ ok: true }`; returns `401 { error: 'REFRESH_FAILED' }` if the refresh token is missing or invalid.
-- `POST /auth/logout`
+- `POST /api/auth/logout`
   - Clears both cookies.
   - Response: `{ ok: true }`.
-- `GET /me`
+- `GET /api/me`
   - Requires `sb_access_token` cookie.
   - Verifies the JWT using JWKS from `${SUPABASE_URL}/auth/v1/.well-known/jwks.json` with issuer `${SUPABASE_URL}/auth/v1` and audience `authenticated`.
   - Loads `profiles` by `payload.sub`; creates a default profile if missing (`plan=free`, `daily_limit=15`, `daily_used=0`).
@@ -91,10 +91,10 @@ Use Row Level Security policies as needed; the API uses the service role key for
 
 ## Auth/session flow recap
 - Frontend signs in via Supabase Auth (email/password or Google provider) and receives `access_token` + `refresh_token`.
-- Frontend calls `POST /auth/session` to store both tokens in httpOnly cookies.
+- Frontend calls `POST /api/auth/session` to store both tokens in httpOnly cookies.
 - Subsequent authenticated calls include cookies; `/me` verifies the access token via JWKS and manages the profile row.
-- If an authenticated request returns `401`, the frontend should call `POST /auth/refresh` to rotate the cookies using the stored refresh token.
-- `POST /auth/logout` removes cookies and ends the session on the API side.
+- If an authenticated request returns `401`, the frontend should call `POST /api/auth/refresh` to rotate the cookies using the stored refresh token.
+- `POST /api/auth/logout` removes cookies and ends the session on the API side.
 
 ## Deploy checklist (quick)
 - [ ] Supabase project created; Email + Google providers enabled.

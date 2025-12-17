@@ -28,12 +28,16 @@ app.use(cors({
 app.use(express.json());
 app.use(cookieParser());
 
-app.get('/health', (req, res) => {
+const api = express.Router();
+
+api.get('/health', (req, res) => {
   res.json({ ok: true });
 });
 
-app.use('/auth', authRouter);
-app.use('/me', meRouter);
+api.use('/auth', authRouter);
+api.use('/me', meRouter);
+
+app.use('/api', api);
 
 app.use((err, req, res, next) => {
   // eslint-disable-next-line no-console
