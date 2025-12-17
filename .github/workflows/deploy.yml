@@ -41,4 +41,4 @@ jobs:
             npm ci --omit=dev
 
             sudo -n /bin/systemctl restart academy-backend
-            sudo -n /bin/systemctl status academy-backend --no-pager -l
+            sudo -n /bin/systemctl status academy-backend
