@@ -1,0 +1,29 @@
+name: Deploy backend
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: SSH deploy
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          script: |
+            set -e
+
+            cd /var/www/academy-backend
+
+            git fetch --all
+            git reset --hard origin/main
+
+            npm install --omit=dev
+
+            sudo systemctl restart academy-backend
+            sudo systemctl status academy-backend --no-pager
