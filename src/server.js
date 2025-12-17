@@ -7,7 +7,7 @@ import meRouter from './routes/me.js';
 
 const app = express();
 
-const corsAllowlist = env.webOrigins;
+const corsAllowlist = env.webOrigins.map((origin) => origin.trim());
 
 app.use(cors({
   origin: (origin, callback) => {
@@ -15,7 +15,9 @@ app.use(cors({
       return callback(null, true);
     }
 
-    if (corsAllowlist.includes(origin)) {
+    const normalizedOrigin = origin.trim();
+
+    if (corsAllowlist.includes(normalizedOrigin)) {
       return callback(null, true);
     }
 

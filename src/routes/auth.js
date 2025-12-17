@@ -1,6 +1,6 @@
+import { createClient } from '@supabase/supabase-js';
 import { Router } from 'express';
 import env from '../config/env.js';
-import supabaseAnon from '../lib/supabaseAnon.js';
 
 const router = Router();
 
@@ -15,6 +15,13 @@ const baseCookieOptions = {
 };
 
 const cookieOptions = (maxAge) => ({ ...baseCookieOptions, maxAge });
+
+const supabaseAuth = createClient(env.supabaseUrl, env.supabaseAnonKey, {
+  auth: {
+    autoRefreshToken: false,
+    persistSession: false,
+  },
+});
 
 router.post('/session', (req, res) => {
   const { access_token: accessToken, refresh_token: refreshToken } = req.body || {};
@@ -36,7 +43,7 @@ router.post('/refresh', async (req, res) => {
     return res.status(401).json({ error: 'NO_REFRESH_TOKEN' });
   }
 
-  const { data, error } = await supabaseAnon.auth.refreshSession({ refresh_token: refreshToken });
+  const { data, error } = await supabaseAuth.auth.refreshSession({ refresh_token: refreshToken });
 
   if (error || !data.session) {
     return res.status(401).json({ error: 'REFRESH_FAILED' });
