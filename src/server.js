@@ -7,8 +7,20 @@ import meRouter from './routes/me.js';
 
 const app = express();
 
+const corsAllowlist = env.webOrigins;
+
 app.use(cors({
-  origin: env.webOrigin,
+  origin: (origin, callback) => {
+    if (!origin) {
+      return callback(null, true);
+    }
+
+    if (corsAllowlist.includes(origin)) {
+      return callback(null, true);
+    }
+
+    return callback(new Error('Not allowed by CORS'));
+  },
   credentials: true,
 }));
 app.use(express.json());

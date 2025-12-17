@@ -18,9 +18,10 @@ Production-ready Express API for Supabase Auth session handling, Google OAuth vi
 | Name | Description |
 | --- | --- |
 | `PORT` | Port the Express server listens on (Render usually provides this). |
-| `WEB_ORIGIN` | Allowed frontend origin for CORS (e.g. `https://app.example.com`). |
+| `WEB_ORIGIN` | Allowed frontend origin(s) for CORS (comma-separated list). |
 | `SUPABASE_URL` | Supabase project URL (e.g. `https://your-project.supabase.co`). |
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase service role key for server-side profile access. |
+| `SUPABASE_ANON_KEY` | Supabase anon key for client-side auth operations (refresh). |
 | `COOKIE_SECURE` | `true` to send cookies with `Secure` (set to `false` for local HTTP). |
 | `NODE_ENV` | `development` or `production`. |
 
@@ -42,6 +43,10 @@ The API will start on `PORT` (defaults to `3000` in `.env.example`).
   - Saves `sb_access_token` (~1h) and `sb_refresh_token` (~30d) as httpOnly cookies
     (`sameSite=lax`, `secure` depends on `COOKIE_SECURE/NODE_ENV`).
   - Response: `{ ok: true }`.
+- `POST /auth/refresh`
+  - Uses `sb_refresh_token` cookie to refresh the Supabase session.
+  - Overwrites both cookies with new tokens on success.
+  - Response: `{ ok: true }`; returns `401 { error: 'REFRESH_FAILED' }` if the refresh token is missing or invalid.
 - `POST /auth/logout`
   - Clears both cookies.
   - Response: `{ ok: true }`.
@@ -94,5 +99,5 @@ Use Row Level Security policies as needed; the API uses the service role key for
 - [ ] Supabase project created; Email + Google providers enabled.
 - [ ] `profiles` table created with SQL above.
 - [ ] Google OAuth client redirect set to `${SUPABASE_URL}/auth/v1/callback` and frontend URLs.
-- [ ] Render env vars set (`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `WEB_ORIGIN`, `COOKIE_SECURE`, `NODE_ENV`, `PORT`).
+- [ ] Render env vars set (`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_ANON_KEY`, `WEB_ORIGIN`, `COOKIE_SECURE`, `NODE_ENV`, `PORT`).
 - [ ] GitHub secret `RENDER_DEPLOY_HOOK_URL` added.

@@ -9,6 +9,7 @@ const requiredKeys = [
   'WEB_ORIGIN',
   'SUPABASE_URL',
   'SUPABASE_SERVICE_ROLE_KEY',
+  'SUPABASE_ANON_KEY',
   'COOKIE_SECURE',
   'NODE_ENV',
 ];
@@ -27,11 +28,17 @@ if (Number.isNaN(port)) {
 const cookieSecure = process.env.COOKIE_SECURE === 'true'
   || (process.env.COOKIE_SECURE !== 'false' && process.env.NODE_ENV === 'production');
 
+const webOrigins = process.env.WEB_ORIGIN
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
 const env = {
   port,
-  webOrigin: process.env.WEB_ORIGIN,
+  webOrigins,
   supabaseUrl: process.env.SUPABASE_URL,
   supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY,
+  supabaseAnonKey: process.env.SUPABASE_ANON_KEY,
   cookieSecure,
   nodeEnv: process.env.NODE_ENV,
 };
