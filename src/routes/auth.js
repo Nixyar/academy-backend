@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import env from '../config/env.js';
+import supabaseAnon from '../lib/supabaseAnon.js';
 
 const router = Router();
 
@@ -24,6 +25,27 @@ router.post('/session', (req, res) => {
 
   res.cookie('sb_access_token', accessToken, cookieOptions(ACCESS_MAX_AGE_MS));
   res.cookie('sb_refresh_token', refreshToken, cookieOptions(REFRESH_MAX_AGE_MS));
+
+  return res.json({ ok: true });
+});
+
+router.post('/refresh', async (req, res) => {
+  const refreshToken = req.cookies?.sb_refresh_token;
+
+  if (!refreshToken) {
+    return res.status(401).json({ error: 'NO_REFRESH_TOKEN' });
+  }
+
+  const { data, error } = await supabaseAnon.auth.refreshSession({ refresh_token: refreshToken });
+
+  if (error || !data.session) {
+    return res.status(401).json({ error: 'REFRESH_FAILED' });
+  }
+
+  const { access_token: accessToken, refresh_token: newRefreshToken } = data.session;
+
+  res.cookie('sb_access_token', accessToken, cookieOptions(ACCESS_MAX_AGE_MS));
+  res.cookie('sb_refresh_token', newRefreshToken, cookieOptions(REFRESH_MAX_AGE_MS));
 
   return res.json({ ok: true });
 });
