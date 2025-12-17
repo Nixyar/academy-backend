@@ -9,7 +9,22 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: SSH deploy
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Copy files to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          source: "."
+          target: "/var/www/academy-backend"
+          rm: true
+          overwrite: true
+          strip_components: 0
+
+      - name: Install & restart
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.SSH_HOST }}
@@ -17,13 +32,8 @@ jobs:
           key: ${{ secrets.SSH_KEY }}
           script: |
             set -e
-
+            sudo chown -R deploy:deploy /var/www/academy-backend
             cd /var/www/academy-backend
-
-            git fetch --all
-            git reset --hard origin/main
-
-            npm install --omit=dev
-
+            npm ci --omit=dev
             sudo systemctl restart academy-backend
             sudo systemctl status academy-backend --no-pager
