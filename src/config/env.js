@@ -10,6 +10,7 @@ const requiredKeys = [
   'SUPABASE_URL',
   'SUPABASE_SERVICE_ROLE_KEY',
   'SUPABASE_ANON_KEY',
+  'SUPABASE_JWT_SECRET',
   'COOKIE_SECURE',
   'NODE_ENV',
 ];
@@ -39,6 +40,7 @@ const env = {
   supabaseUrl: process.env.SUPABASE_URL,
   supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY,
   supabaseAnonKey: process.env.SUPABASE_ANON_KEY,
+  supabaseJwtSecret: process.env.SUPABASE_JWT_SECRET,
   cookieSecure,
   nodeEnv: process.env.NODE_ENV,
 };

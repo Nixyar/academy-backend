@@ -22,6 +22,7 @@ Production-ready Express API for Supabase Auth session handling, Google OAuth vi
 | `SUPABASE_URL` | Supabase project URL (e.g. `https://your-project.supabase.co`). |
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase service role key for server-side profile access. |
 | `SUPABASE_ANON_KEY` | Supabase anon key for client-side auth operations (refresh). |
+| `SUPABASE_JWT_SECRET` | Supabase JWT secret for verifying access tokens (HS256). |
 | `COOKIE_SECURE` | `true` to send cookies with `Secure` (set to `false` for local HTTP). |
 | `NODE_ENV` | `development` or `production`. |
 
@@ -38,8 +39,8 @@ npm run dev
 The API will start on `PORT` (defaults to `3000` in `.env.example`).
 
 ## API endpoints
-- `GET /health` → `{ ok: true }` (for uptime checks).
-- `POST /auth/session` with body `{ access_token, refresh_token }`
+- `GET /api/health` → `{ ok: true }` (for uptime checks).
+- `POST /api/auth/session` with body `{ access_token, refresh_token }`
   - Saves `sb_access_token` (~1h) and `sb_refresh_token` (~30d) as httpOnly cookies
     (`sameSite=lax`, `secure` depends on `COOKIE_SECURE/NODE_ENV`).
   - Response: `{ ok: true }`.
@@ -50,16 +51,16 @@ The API will start on `PORT` (defaults to `3000` in `.env.example`).
   - Creates a Supabase user (stores `name` in user metadata) and inserts a `profiles` row.
   - If Supabase returns a session, the API sets auth cookies; otherwise, no cookies are set (email confirmation flow).
   - Response: `201 { ok: true, user: { id, email, name } }`; returns `400 { error: 'SIGNUP_FAILED' }` or `500 { error: 'PROFILE_CREATE_FAILED' }`.
-- `POST /auth/refresh`
+- `POST /api/auth/refresh`
   - Uses `sb_refresh_token` cookie to refresh the Supabase session.
   - Overwrites both cookies with new tokens on success.
   - Response: `{ ok: true }`; returns `401 { error: 'REFRESH_FAILED' }` if the refresh token is missing or invalid.
-- `POST /auth/logout`
+- `POST /api/auth/logout`
   - Clears both cookies.
   - Response: `{ ok: true }`.
-- `GET /me`
+- `GET /api/me`
   - Requires `sb_access_token` cookie.
-  - Verifies the JWT using JWKS from `${SUPABASE_URL}/auth/v1/.well-known/jwks.json` with issuer `${SUPABASE_URL}/auth/v1` and audience `authenticated`.
+  - Verifies the JWT using `SUPABASE_JWT_SECRET` with issuer `${SUPABASE_URL}/auth/v1` and audience `authenticated`.
   - Loads `profiles` by `payload.sub`; creates a default profile if missing (`plan=free`, `daily_limit=15`, `daily_used=0`).
   - Returns the profile JSON.
 
@@ -83,7 +84,7 @@ Use Row Level Security policies as needed; the API uses the service role key for
 
 ## Deployment to Render (GitHub Actions)
 1. Create a Render Web Service connected to this repo. Choose Node 20 runtime and `npm start` command.
-2. In Render environment variables, set: `PORT` (Render default), `WEB_ORIGIN`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `COOKIE_SECURE=true`, `NODE_ENV=production`.
+2. In Render environment variables, set: `PORT` (Render default), `WEB_ORIGIN`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_ANON_KEY`, `SUPABASE_JWT_SECRET`, `COOKIE_SECURE=true`, `NODE_ENV=production`.
 3. Enable a **Deploy Hook** in Render and copy the hook URL.
 4. In GitHub repo settings → Secrets and variables → Actions, add `RENDER_DEPLOY_HOOK_URL` with the hook URL, plus any runtime env vars you prefer to manage in Actions.
 5. On push to `main`, `.github/workflows/deploy-render.yml` installs deps and calls the deploy hook.
@@ -100,13 +101,15 @@ Use Row Level Security policies as needed; the API uses the service role key for
 - Frontend can call `POST /auth/login` (email/password) to authenticate and set cookies directly.
 - For registration, call `POST /auth/register`; cookies are set only if Supabase returns a session (email confirmations off).
 - If the frontend uses Supabase Auth directly (email/password or Google provider), it can call `POST /auth/session` with `access_token` + `refresh_token` to store cookies.
+- Frontend signs in via Supabase Auth (email/password or Google provider) and receives `access_token` + `refresh_token`.
+- Frontend calls `POST /api/auth/session` to store both tokens in httpOnly cookies.
 - Subsequent authenticated calls include cookies; `/me` verifies the access token via JWKS and manages the profile row.
-- If an authenticated request returns `401`, the frontend should call `POST /auth/refresh` to rotate the cookies using the stored refresh token.
-- `POST /auth/logout` removes cookies and ends the session on the API side.
+- If an authenticated request returns `401`, the frontend should call `POST /api/auth/refresh` to rotate the cookies using the stored refresh token.
+- `POST /api/auth/logout` removes cookies and ends the session on the API side.
 
 ## Deploy checklist (quick)
 - [ ] Supabase project created; Email + Google providers enabled.
 - [ ] `profiles` table created with SQL above.
 - [ ] Google OAuth client redirect set to `${SUPABASE_URL}/auth/v1/callback` and frontend URLs.
-- [ ] Render env vars set (`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_ANON_KEY`, `WEB_ORIGIN`, `COOKIE_SECURE`, `NODE_ENV`, `PORT`).
+- [ ] Render env vars set (`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_ANON_KEY`, `SUPABASE_JWT_SECRET`, `WEB_ORIGIN`, `COOKIE_SECURE`, `NODE_ENV`, `PORT`).
 - [ ] GitHub secret `RENDER_DEPLOY_HOOK_URL` added.
