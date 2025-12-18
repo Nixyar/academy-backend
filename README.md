@@ -6,7 +6,7 @@ Production-ready Express API for Supabase Auth session handling, Google OAuth vi
 - Express (ESM) server with CORS + cookie parsing and health check.
 - Supabase Auth session persistence in httpOnly cookies (access + refresh).
 - JWT validation via Supabase JWKS.
-- Profile `/me` endpoint that auto-creates a profile on first visit.
+- Profile `/api/me` endpoint that auto-creates a profile on first visit.
 - Ready for GitHub → Render deploy hook workflow.
 
 ## Requirements
@@ -44,10 +44,10 @@ The API will start on `PORT` (defaults to `3000` in `.env.example`).
   - Saves `sb_access_token` (~1h) and `sb_refresh_token` (~30d) as httpOnly cookies
     (`sameSite=lax`, `secure` depends on `COOKIE_SECURE/NODE_ENV`).
   - Response: `{ ok: true }`.
-- `POST /auth/login` with body `{ email, password }`
+- `POST /api/auth/login` with body `{ email, password }`
   - Authenticates via Supabase email/password and stores access/refresh tokens in cookies.
   - Response: `{ ok: true, user: { id, email, name } }`; returns `401 { error: 'INVALID_CREDENTIALS' }` on failure.
-- `POST /auth/register` with body `{ name, email, password }`
+- `POST /api/auth/register` with body `{ name, email, password }`
   - Creates a Supabase user (stores `name` in user metadata) and inserts a `profiles` row.
   - If Supabase returns a session, the API sets auth cookies; otherwise, no cookies are set (email confirmation flow).
   - Response: `201 { ok: true, user: { id, email, name } }`; returns `400 { error: 'SIGNUP_FAILED' }` or `500 { error: 'PROFILE_CREATE_FAILED' }`.
@@ -98,12 +98,10 @@ Use Row Level Security policies as needed; the API uses the service role key for
 4. Obtain `SUPABASE_SERVICE_ROLE_KEY` from Settings → API and store it only in env vars (Render + GitHub secret).
 
 ## Auth/session flow recap
-- Frontend can call `POST /auth/login` (email/password) to authenticate and set cookies directly.
-- For registration, call `POST /auth/register`; cookies are set only if Supabase returns a session (email confirmations off).
-- If the frontend uses Supabase Auth directly (email/password or Google provider), it can call `POST /auth/session` with `access_token` + `refresh_token` to store cookies.
-- Frontend signs in via Supabase Auth (email/password or Google provider) and receives `access_token` + `refresh_token`.
-- Frontend calls `POST /api/auth/session` to store both tokens in httpOnly cookies.
-- Subsequent authenticated calls include cookies; `/me` verifies the access token via JWKS and manages the profile row.
+- Frontend can call `POST /api/auth/login` (email/password) to authenticate and set cookies directly.
+- For registration, call `POST /api/auth/register`; cookies are set only if Supabase returns a session (email confirmations off).
+- If the frontend uses Supabase Auth directly (email/password or Google provider), it receives `access_token` + `refresh_token` and calls `POST /api/auth/session` to store cookies.
+- Subsequent authenticated calls include cookies; `/api/me` verifies the access token via HS256 and manages the profile row.
 - If an authenticated request returns `401`, the frontend should call `POST /api/auth/refresh` to rotate the cookies using the stored refresh token.
 - `POST /api/auth/logout` removes cookies and ends the session on the API side.
 
