@@ -22,6 +22,7 @@ Production-ready Express API for Supabase Auth session handling, Google OAuth vi
 | `SUPABASE_URL` | Supabase project URL (e.g. `https://your-project.supabase.co`). |
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase service role key for server-side profile access. |
 | `SUPABASE_ANON_KEY` | Supabase anon key for client-side auth operations (refresh). |
+| `SUPABASE_JWT_SECRET` | Supabase JWT secret for verifying access tokens (HS256). |
 | `COOKIE_SECURE` | `true` to send cookies with `Secure` (set to `false` for local HTTP). |
 | `NODE_ENV` | `development` or `production`. |
 
@@ -52,7 +53,7 @@ The API will start on `PORT` (defaults to `3000` in `.env.example`).
   - Response: `{ ok: true }`.
 - `GET /api/me`
   - Requires `sb_access_token` cookie.
-  - Verifies the JWT using JWKS from `${SUPABASE_URL}/auth/v1/.well-known/jwks.json` with issuer `${SUPABASE_URL}/auth/v1` and audience `authenticated`.
+  - Verifies the JWT using `SUPABASE_JWT_SECRET` with issuer `${SUPABASE_URL}/auth/v1` and audience `authenticated`.
   - Loads `profiles` by `payload.sub`; creates a default profile if missing (`plan=free`, `daily_limit=15`, `daily_used=0`).
   - Returns the profile JSON.
 
@@ -76,7 +77,7 @@ Use Row Level Security policies as needed; the API uses the service role key for
 
 ## Deployment to Render (GitHub Actions)
 1. Create a Render Web Service connected to this repo. Choose Node 20 runtime and `npm start` command.
-2. In Render environment variables, set: `PORT` (Render default), `WEB_ORIGIN`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `COOKIE_SECURE=true`, `NODE_ENV=production`.
+2. In Render environment variables, set: `PORT` (Render default), `WEB_ORIGIN`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_ANON_KEY`, `SUPABASE_JWT_SECRET`, `COOKIE_SECURE=true`, `NODE_ENV=production`.
 3. Enable a **Deploy Hook** in Render and copy the hook URL.
 4. In GitHub repo settings → Secrets and variables → Actions, add `RENDER_DEPLOY_HOOK_URL` with the hook URL, plus any runtime env vars you prefer to manage in Actions.
 5. On push to `main`, `.github/workflows/deploy-render.yml` installs deps and calls the deploy hook.
@@ -100,5 +101,5 @@ Use Row Level Security policies as needed; the API uses the service role key for
 - [ ] Supabase project created; Email + Google providers enabled.
 - [ ] `profiles` table created with SQL above.
 - [ ] Google OAuth client redirect set to `${SUPABASE_URL}/auth/v1/callback` and frontend URLs.
-- [ ] Render env vars set (`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_ANON_KEY`, `WEB_ORIGIN`, `COOKIE_SECURE`, `NODE_ENV`, `PORT`).
+- [ ] Render env vars set (`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_ANON_KEY`, `SUPABASE_JWT_SECRET`, `WEB_ORIGIN`, `COOKIE_SECURE`, `NODE_ENV`, `PORT`).
 - [ ] GitHub secret `RENDER_DEPLOY_HOOK_URL` added.

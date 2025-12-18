@@ -1,10 +1,11 @@
-import { createRemoteJWKSet, jwtVerify } from 'jose';
+import { jwtVerify } from 'jose';
 import env from '../config/env.js';
 
-const jwks = createRemoteJWKSet(new URL(`${env.supabaseUrl}/auth/v1/.well-known/jwks.json`));
+const jwtSecret = new TextEncoder().encode(env.supabaseJwtSecret);
 const verifyOptions = {
   issuer: `${env.supabaseUrl}/auth/v1`,
   audience: 'authenticated',
+  algorithms: ['HS256'],
 };
 
 export default async function requireUser(req, res, next) {
@@ -15,7 +16,7 @@ export default async function requireUser(req, res, next) {
   }
 
   try {
-    const { payload } = await jwtVerify(token, jwks, verifyOptions);
+    const { payload } = await jwtVerify(token, jwtSecret, verifyOptions);
     req.user = {
       id: payload.sub,
       email: payload.email,
