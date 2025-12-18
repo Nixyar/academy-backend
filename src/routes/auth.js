@@ -1,6 +1,7 @@
 import { createClient } from '@supabase/supabase-js';
 import { Router } from 'express';
 import env from '../config/env.js';
+import supabaseAdmin from '../lib/supabaseAdmin.js';
 
 const router = Router();
 
@@ -23,6 +24,22 @@ const supabaseAuth = createClient(env.supabaseUrl, env.supabaseAnonKey, {
   },
 });
 
+const setAuthCookies = (res, session) => {
+  if (!session) {
+    return;
+  }
+
+  const { access_token: accessToken, refresh_token: refreshToken } = session;
+
+  if (accessToken) {
+    res.cookie('sb_access_token', accessToken, cookieOptions(ACCESS_MAX_AGE_MS));
+  }
+
+  if (refreshToken) {
+    res.cookie('sb_refresh_token', refreshToken, cookieOptions(REFRESH_MAX_AGE_MS));
+  }
+};
+
 router.post('/session', (req, res) => {
   const { access_token: accessToken, refresh_token: refreshToken } = req.body || {};
 
@@ -34,6 +51,80 @@ router.post('/session', (req, res) => {
   res.cookie('sb_refresh_token', refreshToken, cookieOptions(REFRESH_MAX_AGE_MS));
 
   return res.json({ ok: true });
+});
+
+router.post('/login', async (req, res) => {
+  const { email, password } = req.body || {};
+
+  if (!email || !password) {
+    return res.status(400).json({ error: 'email and password are required' });
+  }
+
+  const { data, error } = await supabaseAuth.auth.signInWithPassword({ email, password });
+
+  if (error || !data?.session || !data?.user) {
+    return res.status(401).json({ error: 'INVALID_CREDENTIALS' });
+  }
+
+  setAuthCookies(res, data.session);
+
+  return res.json({
+    ok: true,
+    user: {
+      id: data.user.id,
+      email: data.user.email,
+      name: data.user.user_metadata?.name || data.user.user_metadata?.full_name || null,
+    },
+  });
+});
+
+router.post('/register', async (req, res) => {
+  const { name, email, password } = req.body || {};
+
+  if (!name || !email || !password) {
+    return res.status(400).json({ error: 'name, email and password are required' });
+  }
+
+  const { data, error } = await supabaseAuth.auth.signUp({
+    email,
+    password,
+    options: {
+      data: {
+        name,
+      },
+    },
+  });
+
+  if (error || !data?.user) {
+    return res.status(400).json({ error: 'SIGNUP_FAILED' });
+  }
+
+  const profilePayload = {
+    id: data.user.id,
+    email: data.user.email,
+    name,
+  };
+
+  const { error: profileError } = await supabaseAdmin
+    .from('profiles')
+    .upsert(profilePayload);
+
+  if (profileError) {
+    return res.status(500).json({ error: 'PROFILE_CREATE_FAILED' });
+  }
+
+  if (data.session) {
+    setAuthCookies(res, data.session);
+  }
+
+  return res.status(201).json({
+    ok: true,
+    user: {
+      id: data.user.id,
+      email: data.user.email,
+      name,
+    },
+  });
 });
 
 router.post('/refresh', async (req, res) => {
