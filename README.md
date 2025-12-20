@@ -23,6 +23,7 @@ Production-ready Express API for Supabase Auth session handling, Google OAuth vi
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase service role key for server-side profile access. |
 | `SUPABASE_ANON_KEY` | Supabase anon key for client-side auth operations (refresh). |
 | `SUPABASE_JWT_SECRET` | Supabase JWT secret for verifying access tokens (HS256). |
+| `LLM_API_URL` | Full URL for LLM generation endpoint (defaults to `http://95.81.99.208/v1/llm/generate`). |
 | `COOKIE_SECURE` | `true` to send cookies with `Secure` (set to `false` for local HTTP). |
 | `NODE_ENV` | `development` or `production`. |
 
@@ -40,6 +41,9 @@ The API will start on `PORT` (defaults to `3000` in `.env.example`).
 
 ## API endpoints
 - `GET /api/health` → `{ ok: true }` (for uptime checks).
+- `POST /api/llm/generate` with body `{ prompt, system }`
+  - Proxies to configured `LLM_API_URL` with `temperature: 0.2`, `maxTokens: 1024`.
+  - Response mirrors the upstream LLM: `{ text, model, usage: { promptTokens, completionTokens } }` or `502 { error: 'LLM_REQUEST_FAILED' }` if upstream fails.
 - `POST /api/auth/session` with body `{ access_token, refresh_token }`
   - Saves `sb_access_token` (~1h) and `sb_refresh_token` (~30d) as httpOnly cookies
     (`sameSite=lax`, `secure` depends on `COOKIE_SECURE/NODE_ENV`).
