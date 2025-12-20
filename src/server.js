@@ -4,6 +4,7 @@ import cookieParser from 'cookie-parser';
 import env from './config/env.js';
 import authRouter from './routes/auth.js';
 import meRouter from './routes/me.js';
+import llmRouter from './routes/llm.js';
 
 const app = express();
 
@@ -36,6 +37,7 @@ api.get('/health', (req, res) => {
 
 api.use('/auth', authRouter);
 api.use('/me', meRouter);
+api.use('/llm', llmRouter);
 
 app.use('/api', api);
 
