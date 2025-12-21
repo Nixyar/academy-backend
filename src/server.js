@@ -5,6 +5,7 @@ import env from './config/env.js';
 import authRouter from './routes/auth.js';
 import meRouter from './routes/me.js';
 import llmRouter from './routes/llm.js';
+import contentRouter from './routes/content.js';
 
 const app = express();
 
@@ -38,6 +39,7 @@ api.get('/health', (req, res) => {
 api.use('/auth', authRouter);
 api.use('/me', meRouter);
 api.use('/llm', llmRouter);
+api.use('/rest/v1', contentRouter);
 
 app.use('/api', api);
 
