@@ -62,6 +62,14 @@ The API will start on `PORT` (defaults to `3000` in `.env.example`).
 - `POST /api/auth/logout`
   - Clears both cookies.
   - Response: `{ ok: true }`.
+- Content (public, anon key):
+  - `GET /api/rest/v1/courses?status=active`
+    - Optional filters: `status`, `slug`, `access` (`eq.` prefix supported, e.g. `status=eq.active`).
+    - Sorted by `sort_order` ascending.
+  - `GET /api/rest/v1/lessons?course_id=eq.<COURSE_UUID>`
+    - Optional filters: `course_id`, `slug`, `lesson_type` (`eq.` prefix supported).
+    - Sorted by `sort_order` ascending.
+  - `GET /api/rest/v1/lessons?slug=eq.lesson-1&course_id=eq.<COURSE_UUID>` returns a single lesson by slug within a course.
 - `GET /api/me`
   - Requires `sb_access_token` cookie.
   - Verifies the JWT using `SUPABASE_JWT_SECRET` with issuer `${SUPABASE_URL}/auth/v1` and audience `authenticated`.
@@ -85,6 +93,10 @@ create table if not exists public.profiles (
 );
 ```
 Use Row Level Security policies as needed; the API uses the service role key for server-side access.
+
+Courses/lessons tables (minimal fields expected by the API):
+- `courses`: `id uuid PK`, `slug text`, `title text`, `description text`, `cover_url text`, `access text`, `status text`, `sort_order int`, `created_at timestamptz`, `updated_at timestamptz`.
+- `lessons`: `id uuid PK`, `course_id uuid`, `slug text`, `title text`, `lesson_type text`, `sort_order int`, `blocks jsonb`, `created_at timestamptz`, `updated_at timestamptz`.
 
 ## Deployment to Render (GitHub Actions)
 1. Create a Render Web Service connected to this repo. Choose Node 20 runtime and `npm start` command.
