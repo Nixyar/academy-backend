@@ -6,6 +6,7 @@ import authRouter from './routes/auth.js';
 import meRouter from './routes/me.js';
 import llmRouter from './routes/llm.js';
 import contentRouter from './routes/content.js';
+import progressRouter from './routes/progress.js';
 
 const app = express();
 
@@ -39,6 +40,7 @@ api.get('/health', (req, res) => {
 api.use('/auth', authRouter);
 api.use('/me', meRouter);
 api.use('/llm', llmRouter);
+api.use('/', progressRouter);
 api.use('/rest/v1', contentRouter);
 
 app.use('/api', api);
