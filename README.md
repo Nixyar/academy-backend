@@ -75,6 +75,25 @@ The API will start on `PORT` (defaults to `3000` in `.env.example`).
   - Verifies the JWT using `SUPABASE_JWT_SECRET` with issuer `${SUPABASE_URL}/auth/v1` and audience `authenticated`.
   - Loads `profiles` by `payload.sub`; creates a default profile if missing (`plan=free`, `daily_limit=15`, `daily_used=0`).
   - Returns the profile JSON.
+- Progress (auth required, service role writes to `user_course_progress`):
+  - `GET /api/courses/:courseId/progress`
+    - Returns `{ course_id, progress }`. Missing rows return an empty progress object.
+  - `PUT /api/courses/:courseId/progress`
+    - Body: `{ progress: <object> }` or the progress object itself.
+    - Upserts progress for the user/course.
+  - `PATCH /api/courses/:courseId/progress`
+    - Body: patch operation. Supported ops:
+      - `quiz_answer`: `{ op: 'quiz_answer', lessonId, quizId, answer }` → stores answer under `progress.lessons[lessonId].quiz_answers[quizId]`.
+      - `lesson_status`: `{ op: 'lesson_status', lessonId, status: 'in_progress'|'completed', completedAt? }`.
+      - `set_resume`: `{ op: 'set_resume', lessonId }` → sets `resume_lesson_id` and `last_viewed_lesson_id`.
+      - `touch_lesson`: `{ op: 'touch_lesson', lessonId }` → updates `last_viewed_lesson_id`.
+    - Server loads current progress, applies the patch, and upserts.
+  - `GET /api/courses/:courseId/resume`
+    - Response: `{ "lesson_id": "<id>|null" }`.
+    - Picks `resume_lesson_id`/`last_viewed_lesson_id` if set; otherwise chooses the first incomplete lesson (by `sort_order`) or the first lesson if all are completed.
+  - `GET /api/progress?courseIds=course1,course2`
+    - Returns `{ progress: { [courseId]: <progress object or {}> } }` for the requested course IDs.
+    - Missing rows are returned as empty objects to simplify the frontend.
 
 ## Database schema (Supabase SQL)
 Create the `profiles` table in Supabase:
@@ -97,6 +116,17 @@ Use Row Level Security policies as needed; the API uses the service role key for
 Courses/lessons tables (minimal fields expected by the API):
 - `courses`: `id uuid PK`, `slug text`, `title text`, `description text`, `cover_url text`, `access text`, `status text`, `sort_order int`, `created_at timestamptz`, `updated_at timestamptz`.
 - `lessons`: `id uuid PK`, `course_id uuid`, `slug text`, `title text`, `lesson_type text`, `sort_order int`, `blocks jsonb`, `created_at timestamptz`, `updated_at timestamptz`.
+
+Progress table for per-user course tracking:
+```sql
+create table if not exists public.user_course_progress (
+  user_id uuid references auth.users not null,
+  course_id text not null,
+  progress jsonb default '{}'::jsonb,
+  updated_at timestamptz default now(),
+  primary key (user_id, course_id)
+);
+```
 
 ## Deployment to Render (GitHub Actions)
 1. Create a Render Web Service connected to this repo. Choose Node 20 runtime and `npm start` command.
