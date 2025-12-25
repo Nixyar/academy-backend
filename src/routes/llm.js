@@ -1,14 +1,34 @@
 import { Router } from 'express';
 import env from '../config/env.js';
+import supabaseAdmin from '../lib/supabaseAdmin.js';
 
 const router = Router();
 
-router.post('/generate', async (req, res, next) => {
+router.post('/:lessonId/llm', async (req, res, next) => {
   try {
-    const { prompt, system } = req.body || {};
+    const { lessonId } = req.params;
+    const { prompt } = req.body || {};
 
-    if (typeof prompt !== 'string' || typeof system !== 'string') {
-      return res.status(400).json({ error: 'prompt and system are required' });
+    if (typeof prompt !== 'string') {
+      return res.status(400).json({ error: 'prompt is required' });
+    }
+
+    const { data: lesson, error: lessonError } = await supabaseAdmin
+      .from('lessons')
+      .select('id, llm_system_prompt')
+      .eq('id', lessonId)
+      .maybeSingle();
+
+    if (lessonError) {
+      return res.status(500).json({ error: 'FAILED_TO_FETCH_LESSON' });
+    }
+
+    if (!lesson) {
+      return res.status(404).json({ error: 'LESSON_NOT_FOUND' });
+    }
+
+    if (!lesson.llm_system_prompt || typeof lesson.llm_system_prompt !== 'string') {
+      return res.status(400).json({ error: 'LESSON_LLM_SYSTEM_PROMPT_MISSING' });
     }
 
     const llmResponse = await fetch(env.llmApiUrl, {
@@ -16,7 +36,7 @@ router.post('/generate', async (req, res, next) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         prompt,
-        system,
+        system: lesson.llm_system_prompt,
         temperature: 0.2,
         maxTokens: 1024,
       }),
