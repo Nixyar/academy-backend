@@ -39,7 +39,7 @@ api.get('/health', (req, res) => {
 
 api.use('/auth', authRouter);
 api.use('/me', meRouter);
-api.use('/llm', llmRouter);
+api.use('/lessons', llmRouter);
 api.use('/', progressRouter);
 api.use('/rest/v1', contentRouter);
 

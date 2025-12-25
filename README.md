@@ -7,6 +7,7 @@ Production-ready Express API for Supabase Auth session handling, Google OAuth vi
 - Supabase Auth session persistence in httpOnly cookies (access + refresh).
 - JWT validation via Supabase JWKS.
 - Profile `/api/me` endpoint that auto-creates a profile on first visit.
+- Lesson-scoped LLM proxy that pulls `llm_system_prompt` from Supabase.
 - Ready for GitHub → Render deploy hook workflow.
 
 ## Requirements
@@ -41,9 +42,10 @@ The API will start on `PORT` (defaults to `3000` in `.env.example`).
 
 ## API endpoints
 - `GET /api/health` → `{ ok: true }` (for uptime checks).
-- `POST /api/llm/generate` with body `{ prompt, system }`
-  - Proxies to configured `LLM_API_URL` with `temperature: 0.2`, `maxTokens: 1024`.
-  - Response mirrors the upstream LLM: `{ text, model, usage: { promptTokens, completionTokens } }` or `502 { error: 'LLM_REQUEST_FAILED' }` if upstream fails.
+- `POST /api/lessons/:lessonId/llm` with body `{ prompt }`
+  - Loads the lesson by `id` from Supabase and reads `llm_system_prompt`.
+  - Proxies to configured `LLM_API_URL` with `{ prompt, system: llm_system_prompt, temperature: 0.2, maxTokens: 1024 }`.
+  - Response mirrors the upstream LLM: `{ text, model, usage: { promptTokens, completionTokens } }`; returns `404 { error: 'LESSON_NOT_FOUND' }` if the lesson is missing, `400 { error: 'LESSON_LLM_SYSTEM_PROMPT_MISSING' }` if the field is empty, or `502 { error: 'LLM_REQUEST_FAILED' }` if upstream fails.
 - `POST /api/auth/session` with body `{ access_token, refresh_token }`
   - Saves `sb_access_token` (~1h) and `sb_refresh_token` (~30d) as httpOnly cookies
     (`sameSite=lax`, `secure` depends on `COOKIE_SECURE/NODE_ENV`).
@@ -116,6 +118,7 @@ Use Row Level Security policies as needed; the API uses the service role key for
 Courses/lessons tables (minimal fields expected by the API):
 - `courses`: `id uuid PK`, `slug text`, `title text`, `description text`, `cover_url text`, `access text`, `status text`, `sort_order int`, `created_at timestamptz`, `updated_at timestamptz`.
 - `lessons`: `id uuid PK`, `course_id uuid`, `slug text`, `title text`, `lesson_type text`, `sort_order int`, `blocks jsonb`, `created_at timestamptz`, `updated_at timestamptz`.
+- `lessons` additionally needs `llm_system_prompt text` for the LLM endpoint.
 
 Progress table for per-user course tracking:
 ```sql
