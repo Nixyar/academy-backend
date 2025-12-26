@@ -79,7 +79,7 @@ router.post('/:lessonId/llm', async (req, res, next) => {
         system: planSystem,
         prompt: prompt.trim(),
         temperature: 0.6,
-        maxTokens: 1200,
+        maxTokens: 4096,
       }),
     });
 
@@ -111,7 +111,7 @@ router.post('/:lessonId/llm', async (req, res, next) => {
         system: renderSystem,
         prompt: renderPrompt,
         temperature: 0.3,
-        maxTokens: 4096,
+        maxTokens: 8192,
       }),
     });
 
