@@ -95,12 +95,16 @@ router.post('/:lessonId/llm', async (req, res, next) => {
       llmPayload = await llmResponse.text();
     }
 
+    const directHtml = llmPayload && typeof llmPayload === 'object' && typeof llmPayload.html === 'string'
+      ? llmPayload.html
+      : null;
+
     const llmText =
       (llmPayload && typeof llmPayload === 'object' && typeof llmPayload.text === 'string'
         ? llmPayload.text
         : null) || (typeof llmPayload === 'string' ? llmPayload : null);
 
-    const html = extractHtmlFromLlmText(llmText);
+    const html = directHtml || extractHtmlFromLlmText(llmText);
 
     if (!html) {
       return res.status(502).json({
