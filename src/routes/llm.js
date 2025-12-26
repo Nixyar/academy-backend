@@ -4,6 +4,42 @@ import supabaseAdmin from '../lib/supabaseAdmin.js';
 
 const router = Router();
 
+const extractHtmlFromLlmText = (text) => {
+  if (typeof text !== 'string') return null;
+
+  const cleaned = text
+    .replace(/```json/gi, '')
+    .replace(/```/g, '')
+    .replace(/^\s*json\s*\/?\s*/i, '')
+    .trim();
+
+  const start = cleaned.indexOf('{');
+  if (start === -1) return null;
+
+  let depth = 0;
+  for (let i = start; i < cleaned.length; i += 1) {
+    const char = cleaned[i];
+    if (char === '{') depth += 1;
+    if (char === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        const candidate = cleaned.slice(start, i + 1);
+        try {
+          const parsed = JSON.parse(candidate);
+          if (parsed && typeof parsed.html === 'string') {
+            return parsed.html;
+          }
+          return null;
+        } catch {
+          return null;
+        }
+      }
+    }
+  }
+
+  return null;
+};
+
 router.post('/:lessonId/llm', async (req, res, next) => {
   try {
     const { lessonId } = req.params;
@@ -50,8 +86,28 @@ router.post('/:lessonId/llm', async (req, res, next) => {
       });
     }
 
-    const data = await llmResponse.json();
-    return res.json(data);
+    let llmPayload;
+    try {
+      llmPayload = await llmResponse.json();
+    } catch {
+      llmPayload = await llmResponse.text();
+    }
+
+    const llmText =
+      (llmPayload && typeof llmPayload === 'object' && typeof llmPayload.text === 'string'
+        ? llmPayload.text
+        : null) || (typeof llmPayload === 'string' ? llmPayload : null);
+
+    const html = extractHtmlFromLlmText(llmText);
+
+    if (!html) {
+      return res.status(502).json({
+        error: 'LLM_PARSE_FAILED',
+        details: typeof llmText === 'string' ? llmText.slice(0, 500) : undefined,
+      });
+    }
+
+    return res.json({ html });
   } catch (error) {
     return next(error);
   }
