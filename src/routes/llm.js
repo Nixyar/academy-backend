@@ -102,7 +102,7 @@ router.post('/:lessonId/llm', async (req, res, next) => {
         prompt,
         system: lesson.llm_system_prompt,
         temperature: 0.2,
-        maxTokens: 1024,
+        maxTokens: 8192,
       }),
     });
 
@@ -120,6 +120,9 @@ router.post('/:lessonId/llm', async (req, res, next) => {
     } catch {
       llmPayload = await llmResponse.text();
     }
+    // Debug log for tracing upstream LLM responses
+    // eslint-disable-next-line no-console
+    console.log('[LLM] response', { lessonId, payload: llmPayload });
 
     const directHtml = llmPayload && typeof llmPayload === 'object' && typeof llmPayload.html === 'string'
       ? llmPayload.html
