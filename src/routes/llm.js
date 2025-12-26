@@ -104,7 +104,21 @@ router.post('/:lessonId/llm', async (req, res, next) => {
         ? llmPayload.text
         : null) || (typeof llmPayload === 'string' ? llmPayload : null);
 
-    const html = directHtml || extractHtmlFromLlmText(llmText);
+    let html = directHtml || extractHtmlFromLlmText(llmText);
+
+    if (typeof html === 'string') {
+      const trimmed = html.trim();
+      if (trimmed.startsWith('{')) {
+        try {
+          const parsedInner = JSON.parse(trimmed);
+          if (parsedInner && typeof parsedInner.html === 'string') {
+            html = parsedInner.html;
+          }
+        } catch {
+          // leave html as-is
+        }
+      }
+    }
 
     if (!html) {
       return res.status(502).json({
