@@ -14,7 +14,9 @@ const extractHtmlFromLlmText = (text) => {
     .trim();
 
   const start = cleaned.indexOf('{');
-  if (start === -1) return null;
+  if (start === -1) {
+    return cleaned.includes('<') ? cleaned : null;
+  }
 
   let depth = 0;
   for (let i = start; i < cleaned.length; i += 1) {
@@ -37,7 +39,7 @@ const extractHtmlFromLlmText = (text) => {
     }
   }
 
-  return null;
+  return cleaned.includes('<') ? cleaned : null;
 };
 
 router.post('/:lessonId/llm', async (req, res, next) => {
