@@ -150,7 +150,8 @@ router.post('/:lessonId/llm', async (req, res, next) => {
       });
     }
 
-    return res.json({ html });
+    res.set('Content-Type', 'text/html; charset=utf-8');
+    return res.send(html);
   } catch (error) {
     return next(error);
   }
