@@ -13,29 +13,31 @@ const extractHtmlFromLlmText = (text) => {
     .replace(/^\s*json\s*\/?\s*/i, '')
     .trim();
 
-  const start = cleaned.indexOf('{');
-  if (start === -1) {
-    return cleaned.includes('<') ? cleaned : null;
-  }
-
-  let depth = 0;
-  for (let i = start; i < cleaned.length; i += 1) {
-    const char = cleaned[i];
-    if (char === '{') depth += 1;
-    if (char === '}') {
-      depth -= 1;
-      if (depth === 0) {
-        const candidate = cleaned.slice(start, i + 1);
-        try {
-          const parsed = JSON.parse(candidate);
-          if (parsed && typeof parsed.html === 'string') {
-            return parsed.html;
-          }
-          return null;
-        } catch {
-          return null;
-        }
+  const tryParseHtml = (value) => {
+    try {
+      const parsed = JSON.parse(value);
+      if (parsed && typeof parsed.html === 'string') {
+        return parsed.html;
       }
+    } catch {
+      // fall through
+    }
+    return null;
+  };
+
+  const directParsed = tryParseHtml(cleaned);
+  if (directParsed) return directParsed;
+
+  const jsonMatch = cleaned.match(/\{[\s\S]*?"html"[\s\S]*?\}/);
+  if (jsonMatch) {
+    const parsed = tryParseHtml(jsonMatch[0]);
+    if (parsed) return parsed;
+
+    const htmlCapture = jsonMatch[0].match(/"html"\s*:\s*"([\s\S]*?)"/);
+    if (htmlCapture) {
+      return htmlCapture[1]
+        .replace(/\\"/g, '"')
+        .replace(/\\n/g, '\n');
     }
   }
 
@@ -104,7 +106,7 @@ router.post('/:lessonId/llm', async (req, res, next) => {
         ? llmPayload.text
         : null) || (typeof llmPayload === 'string' ? llmPayload : null);
 
-    let html = directHtml || extractHtmlFromLlmText(llmText);
+    let html = extractHtmlFromLlmText(directHtml) || extractHtmlFromLlmText(llmText);
 
     if (typeof html === 'string') {
       const trimmed = html.trim();
