@@ -8,24 +8,40 @@ const stripFences = (s) =>
   String(s || '')
     .replace(/```json/gi, '')
     .replace(/```/g, '')
+    .replace(/^\s*json\s*\/?\s*/i, '')
     .trim();
 
-const safeJsonParse = (s) => {
+const tryParseJsonObject = (s) => {
   try {
-    return JSON.parse(s);
+    const parsed = JSON.parse(s);
+    return parsed && typeof parsed === 'object' ? parsed : null;
   } catch {
     return null;
   }
 };
 
+const repairJson = (s) => {
+  const withoutTrailingCommas = s.replace(/,\s*([}\]])/g, '$1');
+
+  const parsed = tryParseJsonObject(withoutTrailingCommas);
+  if (parsed) return parsed;
+
+  const firstBrace = withoutTrailingCommas.indexOf('{');
+  const lastBrace = withoutTrailingCommas.lastIndexOf('}');
+  if (firstBrace !== -1 && lastBrace > firstBrace) {
+    return tryParseJsonObject(withoutTrailingCommas.slice(firstBrace, lastBrace + 1));
+  }
+  return null;
+};
+
 const extractFirstJsonObject = (text) => {
   const cleaned = stripFences(text);
-  const direct = safeJsonParse(cleaned);
+  const direct = repairJson(cleaned);
   if (direct) return direct;
 
   const m = cleaned.match(/\{[\s\S]*\}/);
   if (!m) return null;
-  return safeJsonParse(m[0]);
+  return repairJson(m[0]);
 };
 
 router.post('/:lessonId/llm', async (req, res, next) => {
