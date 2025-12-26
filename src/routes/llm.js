@@ -44,6 +44,30 @@ const extractHtmlFromLlmText = (text) => {
   return cleaned.includes('<') ? cleaned : null;
 };
 
+const unwrapHtml = (value) => {
+  let s = typeof value === 'string' ? value.trim() : '';
+  for (let i = 0; i < 3; i += 1) {
+    if (/<(!doctype|html)\b/i.test(s) || /<head\b/i.test(s) || /<body\b/i.test(s)) {
+      return s;
+    }
+
+    if (s.startsWith('{') && s.endsWith('}')) {
+      try {
+        const obj = JSON.parse(s);
+        if (obj && typeof obj.html === 'string') {
+          s = obj.html.trim();
+          continue;
+        }
+      } catch {
+        // not JSON, stop unwrapping
+      }
+    }
+
+    break;
+  }
+  return s;
+};
+
 router.post('/:lessonId/llm', async (req, res, next) => {
   try {
     const { lessonId } = req.params;
@@ -109,23 +133,20 @@ router.post('/:lessonId/llm', async (req, res, next) => {
     let html = extractHtmlFromLlmText(directHtml) || extractHtmlFromLlmText(llmText);
 
     if (typeof html === 'string') {
-      const trimmed = html.trim();
-      if (trimmed.startsWith('{')) {
-        try {
-          const parsedInner = JSON.parse(trimmed);
-          if (parsedInner && typeof parsedInner.html === 'string') {
-            html = parsedInner.html;
-          }
-        } catch {
-          // leave html as-is
-        }
-      }
+      html = unwrapHtml(html);
     }
 
     if (!html) {
       return res.status(502).json({
         error: 'LLM_PARSE_FAILED',
         details: typeof llmText === 'string' ? llmText.slice(0, 500) : undefined,
+      });
+    }
+
+    if (!/<(!doctype|html)\b/i.test(html)) {
+      return res.status(502).json({
+        error: 'LLM_RETURNED_NON_HTML',
+        details: html.slice(0, 500),
       });
     }
 
