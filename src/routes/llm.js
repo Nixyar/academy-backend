@@ -4,68 +4,28 @@ import supabaseAdmin from '../lib/supabaseAdmin.js';
 
 const router = Router();
 
-const extractHtmlFromLlmText = (text) => {
-  if (typeof text !== 'string') return null;
-
-  const cleaned = text
+const stripFences = (s) =>
+  String(s || '')
     .replace(/```json/gi, '')
     .replace(/```/g, '')
-    .replace(/^\s*json\s*\/?\s*/i, '')
     .trim();
 
-  const tryParseHtml = (value) => {
-    try {
-      const parsed = JSON.parse(value);
-      if (parsed && typeof parsed.html === 'string') {
-        return parsed.html;
-      }
-    } catch {
-      // fall through
-    }
+const safeJsonParse = (s) => {
+  try {
+    return JSON.parse(s);
+  } catch {
     return null;
-  };
-
-  const directParsed = tryParseHtml(cleaned);
-  if (directParsed) return directParsed;
-
-  const jsonMatch = cleaned.match(/\{[\s\S]*?"html"[\s\S]*?\}/);
-  if (jsonMatch) {
-    const parsed = tryParseHtml(jsonMatch[0]);
-    if (parsed) return parsed;
-
-    const htmlCapture = jsonMatch[0].match(/"html"\s*:\s*"([\s\S]*?)"/);
-    if (htmlCapture) {
-      return htmlCapture[1]
-        .replace(/\\"/g, '"')
-        .replace(/\\n/g, '\n');
-    }
   }
-
-  return cleaned.includes('<') ? cleaned : null;
 };
 
-const unwrapHtml = (value) => {
-  let s = typeof value === 'string' ? value.trim() : '';
-  for (let i = 0; i < 3; i += 1) {
-    if (/<(!doctype|html)\b/i.test(s) || /<head\b/i.test(s) || /<body\b/i.test(s)) {
-      return s;
-    }
+const extractFirstJsonObject = (text) => {
+  const cleaned = stripFences(text);
+  const direct = safeJsonParse(cleaned);
+  if (direct) return direct;
 
-    if (s.startsWith('{') && s.endsWith('}')) {
-      try {
-        const obj = JSON.parse(s);
-        if (obj && typeof obj.html === 'string') {
-          s = obj.html.trim();
-          continue;
-        }
-      } catch {
-        // not JSON, stop unwrapping
-      }
-    }
-
-    break;
-  }
-  return s;
+  const m = cleaned.match(/\{[\s\S]*\}/);
+  if (!m) return null;
+  return safeJsonParse(m[0]);
 };
 
 router.post('/:lessonId/llm', async (req, res, next) => {
@@ -73,90 +33,97 @@ router.post('/:lessonId/llm', async (req, res, next) => {
     const { lessonId } = req.params;
     const { prompt } = req.body || {};
 
-    if (typeof prompt !== 'string') {
+    if (typeof prompt !== 'string' || !prompt.trim()) {
       return res.status(400).json({ error: 'prompt is required' });
     }
 
     const { data: lesson, error: lessonError } = await supabaseAdmin
       .from('lessons')
-      .select('id, llm_system_prompt')
+      .select('id, llm_plan_system_prompt, llm_render_system_prompt')
       .eq('id', lessonId)
       .maybeSingle();
 
-    if (lessonError) {
-      return res.status(500).json({ error: 'FAILED_TO_FETCH_LESSON' });
+    if (lessonError) return res.status(500).json({ error: 'FAILED_TO_FETCH_LESSON' });
+    if (!lesson) return res.status(404).json({ error: 'LESSON_NOT_FOUND' });
+
+    const planSystem = lesson.llm_plan_system_prompt;
+    const renderSystem = lesson.llm_render_system_prompt;
+
+    if (typeof planSystem !== 'string' || !planSystem.trim()) {
+      return res.status(400).json({ error: 'LESSON_LLM_PLAN_SYSTEM_PROMPT_MISSING' });
+    }
+    if (typeof renderSystem !== 'string' || !renderSystem.trim()) {
+      return res.status(400).json({ error: 'LESSON_LLM_RENDER_SYSTEM_PROMPT_MISSING' });
     }
 
-    if (!lesson) {
-      return res.status(404).json({ error: 'LESSON_NOT_FOUND' });
-    }
-
-    if (!lesson.llm_system_prompt || typeof lesson.llm_system_prompt !== 'string') {
-      return res.status(400).json({ error: 'LESSON_LLM_SYSTEM_PROMPT_MISSING' });
-    }
-
-    const llmResponse = await fetch(env.llmApiUrl, {
+    const planResp = await fetch(env.llmApiUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        prompt,
-        system: lesson.llm_system_prompt,
-        temperature: 0.2,
-        maxTokens: 8192,
+        system: planSystem,
+        prompt: prompt.trim(),
+        temperature: 0.6,
+        maxTokens: 1200,
       }),
     });
 
-    if (!llmResponse.ok) {
-      const errorText = await llmResponse.text().catch(() => null);
+    if (!planResp.ok) {
+      const errorText = await planResp.text().catch(() => null);
       return res.status(502).json({
-        error: 'LLM_REQUEST_FAILED',
-        details: errorText || llmResponse.statusText,
+        error: 'LLM_PLAN_REQUEST_FAILED',
+        details: errorText || planResp.statusText,
       });
     }
 
-    let llmPayload;
-    try {
-      llmPayload = await llmResponse.json();
-    } catch {
-      llmPayload = await llmResponse.text();
-    }
-    // Debug log for tracing upstream LLM responses
-    // eslint-disable-next-line no-console
-    console.log('[LLM] response', { lessonId, payload: llmPayload });
+    const planPayload = await planResp.json().catch(async () => ({ text: await planResp.text() }));
+    const planText = typeof planPayload?.text === 'string' ? planPayload.text : String(planPayload || '');
+    const planObj = extractFirstJsonObject(planText);
 
-    const directHtml = llmPayload && typeof llmPayload === 'object' && typeof llmPayload.html === 'string'
-      ? llmPayload.html
-      : null;
-
-    const llmText =
-      (llmPayload && typeof llmPayload === 'object' && typeof llmPayload.text === 'string'
-        ? llmPayload.text
-        : null) || (typeof llmPayload === 'string' ? llmPayload : null);
-
-    let html = extractHtmlFromLlmText(directHtml) || extractHtmlFromLlmText(llmText);
-
-    if (typeof html === 'string') {
-      html = unwrapHtml(html);
-    }
-
-    if (!html) {
+    if (!planObj || typeof planObj !== 'object') {
       return res.status(502).json({
-        error: 'LLM_PARSE_FAILED',
-        details: typeof llmText === 'string' ? llmText.slice(0, 500) : undefined,
+        error: 'LLM_PLAN_PARSE_FAILED',
+        details: stripFences(planText).slice(0, 800),
       });
     }
 
-    if (!/<(!doctype|html)\b/i.test(html)) {
+    const renderPrompt = `Сгенерируй HTML по этому плану. План (JSON):\n${JSON.stringify(planObj)}`;
+
+    const htmlResp = await fetch(env.llmApiUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        system: renderSystem,
+        prompt: renderPrompt,
+        temperature: 0.3,
+        maxTokens: 4096,
+      }),
+    });
+
+    if (!htmlResp.ok) {
+      const errorText = await htmlResp.text().catch(() => null);
       return res.status(502).json({
-        error: 'LLM_RETURNED_NON_HTML',
-        details: html.slice(0, 500),
+        error: 'LLM_RENDER_REQUEST_FAILED',
+        details: errorText || htmlResp.statusText,
       });
     }
 
-    res.set('Content-Type', 'text/html; charset=utf-8');
-    return res.send(html);
-  } catch (error) {
-    return next(error);
+    const htmlPayload = await htmlResp.json().catch(async () => ({ text: await htmlResp.text() }));
+    const directHtml = typeof htmlPayload?.html === 'string' ? htmlPayload.html : null;
+    const htmlText = typeof htmlPayload?.text === 'string' ? htmlPayload.text : null;
+
+    const htmlObj = directHtml ? { html: directHtml } : extractFirstJsonObject(htmlText);
+    const html = typeof htmlObj?.html === 'string' ? htmlObj.html : null;
+
+    if (!html || !html.includes('</html>')) {
+      return res.status(502).json({
+        error: 'LLM_RENDER_PARSE_FAILED',
+        details: stripFences(String(htmlText || directHtml || '')).slice(0, 800),
+      });
+    }
+
+    return res.json({ html, plan: planObj });
+  } catch (e) {
+    return next(e);
   }
 });
 
