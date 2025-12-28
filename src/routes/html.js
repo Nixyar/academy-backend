@@ -563,14 +563,7 @@ ${sectionHtml}
 
             if (!isValidSection(forced, key)) {
               const fallback = buildFallbackSection(key, sectionSpec);
-              if (!isValidSection(fallback, key)) {
-                failStream({
-                  message: 'LLM_SECTION_INVALID',
-                  details: JSON.stringify(sectionDiagnostics(sectionHtml, key)),
-                });
-                return;
-              }
-              sectionHtml = fallback;
+              sectionHtml = isValidSection(fallback, key) ? fallback : forceWrapSection(fallback, key);
             } else {
               sectionHtml = forced;
             }
