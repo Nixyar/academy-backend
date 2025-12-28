@@ -80,6 +80,31 @@ const cleanHtmlFragment = (html) => {
   return cleaned.trim();
 };
 
+const tryExtractHtmlField = (text) => {
+  const obj = extractFirstJsonObject(text);
+  if (obj && typeof obj === 'object' && typeof obj.html === 'string') return obj.html;
+  return null;
+};
+
+// LLM иногда отдаёт HTML с \" и \\n — приводим к нормальному виду
+const normalizeLlmHtml = (raw) => {
+  let s = String(raw || '');
+
+  // если это JSON вида {"html":"<section ...>"} — достаём поле html
+  const fromJson = tryExtractHtmlField(s);
+  if (fromJson) s = fromJson;
+
+  // разэкранируем типовые последовательности
+  s = s
+    .replace(/\\n/g, '\n')
+    .replace(/\\t/g, '\t')
+    .replace(/\\"/g, '"')
+    .replace(/\\'/g, "'")
+    .replace(/\\\\/g, '\\');
+
+  return s;
+};
+
 const stripStyleTags = (html) => String(html || '').replace(/<style[\s\S]*?<\/style>/gi, '').trim();
 
 // опционально: если хочешь максимально "чистый" HTML без inline стилей
@@ -105,6 +130,17 @@ const isValidSection = (html, id) => {
   if (!s.toLowerCase().includes('<section')) return false;
   if (!s.toLowerCase().includes('</section>')) return false;
   return hasSectionWithId(s, id);
+};
+
+const sectionDiagnostics = (html, id) => {
+  const s = String(html || '');
+  return {
+    id,
+    hasSectionTag: /<section\b/i.test(s),
+    hasClose: /<\/section>/i.test(s),
+    hasId: hasSectionWithId(s, id),
+    sample: s.slice(0, 120),
+  };
 };
 
 const canWrite = (res) => res && !res.writableEnded && !res.writableFinished && !res.destroyed;
@@ -451,7 +487,7 @@ Return ONLY:
           maxTokens: 2000,
         });
 
-        let sectionHtml = cleanHtmlFragment(sectionText);
+        let sectionHtml = cleanHtmlFragment(normalizeLlmHtml(sectionText));
         sectionHtml = stripStyleTags(sectionHtml);
         // опционально:
         sectionHtml = stripInlineStyleAttrs(sectionHtml);
@@ -474,13 +510,16 @@ ${sectionHtml}
             maxTokens: 1500,
           });
 
-          sectionHtml = cleanHtmlFragment(repairedText);
+          sectionHtml = cleanHtmlFragment(normalizeLlmHtml(repairedText));
           sectionHtml = stripStyleTags(sectionHtml);
           // опционально:
           sectionHtml = stripInlineStyleAttrs(sectionHtml);
 
           if (!isValidSection(sectionHtml, key)) {
-            failStream({ message: 'LLM_SECTION_INVALID', details: 'INVALID_SECTION_HTML' });
+            failStream({
+              message: 'LLM_SECTION_INVALID',
+              details: JSON.stringify(sectionDiagnostics(sectionHtml, key)),
+            });
             return;
           }
         }
