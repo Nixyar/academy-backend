@@ -7,6 +7,14 @@ const router = Router();
 
 const jobs = new Map(); // Map<jobId, { status, outline, css, sections, html }>
 
+const CSS_SYSTEM_SUFFIX = "Ты генерируешь только CSS. Запрещено: HTML/JSON/markdown/<style>.";
+const SECTION_SYSTEM_SUFFIX = [
+  "Ты генерируешь только HTML фрагмент одной секции.",
+  "Строго: <section id='{ID}'>...</section>.",
+  "Запрещено: <html>,<head>,<body>,<main>,<style>,<script>,<title>, JSON, markdown.",
+  'Не экранируй кавычки в атрибутах, не используй \\\".',
+].join(' ');
+
 const stripFences = (s) =>
   String(s || '')
     .replace(/```json/gi, '')
@@ -61,9 +69,8 @@ const cleanHtmlFragment = (html) => {
 const canWrite = (res) => res && !res.writableEnded && !res.writableFinished && !res.destroyed;
 
 const sendSse = (res, event, payload) => {
-  if (!canWrite(res)) return;
-
   try {
+    if (!canWrite(res)) return;
     const normalized = payload === undefined ? '' : payload;
     const data = typeof normalized === 'string' ? normalized : JSON.stringify(normalized);
     const safeData = typeof data === 'string' ? data : '';
@@ -231,6 +238,8 @@ router.post('/start', async (req, res, next) => {
 router.get('/stream', async (req, res, next) => {
   let job;
   let streamStarted = false;
+  let pingInterval;
+  let watcherInterval;
 
   try {
     const { jobId } = req.query || {};
@@ -251,27 +260,47 @@ router.get('/stream', async (req, res, next) => {
     let aborted = false;
     req.on('close', () => {
       aborted = true;
+      clearInterval(pingInterval);
+      clearInterval(watcherInterval);
     });
 
     const failStream = (err) => {
+      const normalizeDetails = (details) => {
+        if (typeof details !== 'string') return null;
+        const trimmed = details.trim();
+        if (!trimmed) return null;
+        const looksLikeHtml = /<[^>]+>/.test(trimmed);
+        if (looksLikeHtml) return 'INVALID_SECTION_HTML';
+        return trimmed.slice(0, 200);
+      };
+
       try {
-        const message = err?.details || err?.message || 'STREAM_FAILED';
+        const code = err?.message || 'STREAM_FAILED';
+        const safeDetails = normalizeDetails(err?.details) || normalizeDetails(err?.message);
         job.status = 'error';
-        sendSse(res, 'error', message);
+        sendSse(res, 'error', { code, details: safeDetails || code });
       } catch {
         // ignore
       } finally {
+        clearInterval(pingInterval);
+        clearInterval(watcherInterval);
         if (canWrite(res)) res.end();
       }
     };
 
+    let replayed = false;
     if (job.css) sendSse(res, 'css', { css: job.css });
     if (job.sectionOrder?.length) {
       job.sectionOrder.forEach((key) => {
         if (job.sections[key]) {
           sendSse(res, 'section', { id: key, html: job.sections[key] });
+          replayed = true;
         }
       });
+    }
+
+    if (replayed || job.css) {
+      sendSse(res, 'info', { status: 'replayed' });
     }
 
     if (job.status === 'done') {
@@ -281,41 +310,45 @@ router.get('/stream', async (req, res, next) => {
 
     if (job.status === 'running') {
       sendSse(res, 'info', { status: 'running' });
-      const ping = setInterval(() => {
-        if (!canWrite(res)) {
-          clearInterval(ping);
-          return;
+      pingInterval = setInterval(() => {
+        if (canWrite(res)) {
+          res.write(': ping\n\n');
+        } else {
+          clearInterval(pingInterval);
         }
-        res.write(': ping\n\n');
       }, 20000);
 
-      const watcher = setInterval(() => {
+      watcherInterval = setInterval(() => {
         if (!canWrite(res)) {
-          clearInterval(watcher);
+          clearInterval(watcherInterval);
           return;
         }
         if (job.status === 'done') {
           sendSse(res, 'done', { status: 'ready' });
           res.end();
-          clearInterval(watcher);
-          clearInterval(ping);
-        }
-        if (job.status === 'error') {
-          sendSse(res, 'error', 'STREAM_FAILED');
+          clearInterval(watcherInterval);
+          clearInterval(pingInterval);
+        } else if (job.status === 'error') {
+          sendSse(res, 'error', { code: 'STREAM_FAILED', details: 'STREAM_FAILED' });
           res.end();
-          clearInterval(watcher);
-          clearInterval(ping);
+          clearInterval(watcherInterval);
+          clearInterval(pingInterval);
         }
       }, 1000);
 
-      req.on('close', () => {
-        clearInterval(ping);
-        clearInterval(watcher);
-      });
       return;
     }
 
     job.status = 'running';
+    sendSse(res, 'info', { status: 'running' });
+
+    pingInterval = setInterval(() => {
+      if (canWrite(res)) {
+        res.write(': ping\n\n');
+      } else {
+        clearInterval(pingInterval);
+      }
+    }, 20000);
 
     try {
       if (!job.css) {
@@ -329,7 +362,7 @@ router.get('/stream', async (req, res, next) => {
         ].join('\n');
 
         const cssText = await callLlm({
-          system: job.renderSystem,
+          system: `${job.renderSystem}\n\n${CSS_SYSTEM_SUFFIX}`,
           prompt: cssPrompt,
           temperature: 0.4,
           maxTokens: 2048,
@@ -344,34 +377,63 @@ router.get('/stream', async (req, res, next) => {
         : [];
 
       for (const key of sectionsToGenerate) {
-        if (aborted) return;
-
         const sectionSpec = job.sectionSpecs?.[key] ?? job.outline?.[key];
+        const minimalPlan = {
+          title: job.outline?.title,
+          theme: job.outline?.theme,
+          constraints: job.outline?.constraints,
+          lang: job.outline?.lang,
+        };
         const sectionPrompt = [
           `Сгенерируй HTML секцию "${key}" по плану ниже.`,
           `Разметка должна содержать единственный корневой <section id="${key}">.`,
           'Верни только разметку секции без <html>, <head>, <body> и без стилей.',
           'Учитывай пользовательский запрос:',
           job.prompt,
-          'План (JSON):',
-          JSON.stringify(job.outline),
+          'Краткий план:',
+          JSON.stringify(minimalPlan),
           'Детали секции:',
           JSON.stringify(sectionSpec ?? {}),
         ].join('\n');
 
         const sectionText = await callLlm({
-          system: job.renderSystem,
+          system: `${job.renderSystem}\n\n${SECTION_SYSTEM_SUFFIX.replace('{ID}', key)}`,
           prompt: sectionPrompt,
-          temperature: 0.35,
-          maxTokens: 4096,
+          temperature: 0.15,
+          maxTokens: 2200,
         });
 
-        const sectionHtml = cleanHtmlFragment(sectionText);
-        if (!sectionHtml.includes('<section') || !sectionHtml.includes(`id="${key}"`)) {
-          throw Object.assign(new Error('LLM_SECTION_INVALID'), {
-            status: 502,
-            details: sectionHtml.slice(0, 400),
+        const validateSection = (html) =>
+          typeof html === 'string' &&
+          html.includes('<section') &&
+          html.includes(`id="${key}"`) &&
+          html.includes('</section>');
+
+        let sectionHtml = cleanHtmlFragment(sectionText);
+
+        if (!validateSection(sectionHtml)) {
+          const repairPrompt = [
+            `Исправь результат так, чтобы он был строго: <section id="${key}"> ... </section>.`,
+            'Верни только исправленный HTML.',
+            'Исходный фрагмент:',
+            sectionHtml,
+          ].join('\n');
+
+          const repairedText = await callLlm({
+            system: `${job.renderSystem}\n\n${SECTION_SYSTEM_SUFFIX.replace('{ID}', key)}`,
+            prompt: repairPrompt,
+            temperature: 0.05,
+            maxTokens: 1500,
           });
+
+          sectionHtml = cleanHtmlFragment(repairedText);
+
+          if (!validateSection(sectionHtml)) {
+            throw Object.assign(new Error('LLM_SECTION_INVALID'), {
+              status: 502,
+              details: sectionHtml.slice(0, 400),
+            });
+          }
         }
         job.sections[key] = sectionHtml;
         sendSse(res, 'section', { id: key, html: sectionHtml });
@@ -381,15 +443,13 @@ router.get('/stream', async (req, res, next) => {
       return;
     }
 
-    if (aborted) return;
-
     const assembledSections = (job.sectionOrder || Object.keys(job.sections)).map(
       (key) => job.sections[key] || '',
     );
 
     const finalHtml = [
       '<!DOCTYPE html>',
-      '<html lang="en">',
+      `<html lang="${job.outline?.lang || 'ru'}">`,
       '<head>',
       '<meta charset="UTF-8" />',
       '<meta name="viewport" content="width=device-width, initial-scale=1.0" />',
@@ -407,7 +467,10 @@ router.get('/stream', async (req, res, next) => {
     job.status = 'done';
 
     sendSse(res, 'done', { status: 'ready' });
-    return res.end();
+    clearInterval(pingInterval);
+    clearInterval(watcherInterval);
+    if (canWrite(res)) res.end();
+    return;
   } catch (e) {
     // eslint-disable-next-line no-console
     console.error('HTML stream failed', e);
@@ -415,7 +478,13 @@ router.get('/stream', async (req, res, next) => {
       job.status = 'error';
     }
     if (streamStarted) {
-      sendSse(res, 'error', e?.details || e?.message || 'STREAM_FAILED');
+      const looksLikeHtml = typeof e?.details === 'string' && /<[^>]+>/.test(e.details);
+      const code = e?.message || 'STREAM_FAILED';
+      const safeDetails =
+        looksLikeHtml || typeof e?.details !== 'string'
+          ? code
+          : e.details.trim().slice(0, 200) || code;
+      sendSse(res, 'error', { code, details: safeDetails });
       if (canWrite(res)) res.end();
       return;
     }
