@@ -12,7 +12,6 @@ import progressRouter from './routes/progress.js';
 const app = express();
 
 const corsAllowlist = env.webOrigins.map((origin) => origin.trim());
-const allowAllLocalhost = env.nodeEnv !== 'production';
 
 const isAllowedOrigin = (origin) => {
   if (!origin) return true;
@@ -20,9 +19,8 @@ const isAllowedOrigin = (origin) => {
   const normalized = origin.trim();
   if (corsAllowlist.includes(normalized)) return true;
 
-  if (allowAllLocalhost && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(normalized)) {
-    return true;
-  }
+  // Always allow localhost so local dev ports like 3000/3001/5173 work even if NODE_ENV=production
+  if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(normalized)) return true;
 
   return false;
 };
