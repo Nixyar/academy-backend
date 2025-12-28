@@ -259,17 +259,17 @@ router.get('/stream', async (req, res, next) => {
       if (canWrite(res)) res.end();
     };
 
-    if (job.css) sendSse(res, 'css', job.css);
+    if (job.css) sendSse(res, 'css', { css: job.css });
     if (job.sectionOrder?.length) {
       job.sectionOrder.forEach((key) => {
         if (job.sections[key]) {
-          sendSse(res, `section:${key}`, job.sections[key]);
+          sendSse(res, 'section', { id: key, html: job.sections[key] });
         }
       });
     }
 
     if (job.status === 'done') {
-      sendSse(res, 'done', 'ready');
+      sendSse(res, 'done', { status: 'ready' });
       return res.end();
     }
 
@@ -294,7 +294,7 @@ router.get('/stream', async (req, res, next) => {
         });
 
         job.css = cleanCss(cssText);
-        sendSse(res, 'css', job.css);
+        sendSse(res, 'css', { css: job.css });
       }
 
       const sectionsToGenerate = job.sectionOrder?.length
@@ -325,7 +325,7 @@ router.get('/stream', async (req, res, next) => {
 
         const sectionHtml = cleanHtmlFragment(sectionText);
         job.sections[key] = sectionHtml;
-        sendSse(res, `section:${key}`, sectionHtml);
+        sendSse(res, 'section', { id: key, html: sectionHtml });
       }
     } catch (err) {
       failStream(err);
@@ -357,7 +357,7 @@ router.get('/stream', async (req, res, next) => {
     job.html = finalHtml;
     job.status = 'done';
 
-    sendSse(res, 'done', 'ready');
+    sendSse(res, 'done', { status: 'ready' });
     return res.end();
   } catch (e) {
     // eslint-disable-next-line no-console
