@@ -79,24 +79,20 @@ const sendSse = (res, event, payload) => {
 };
 
 const deriveSections = (outline) => {
-  if (!outline) return [];
+  if (!outline || typeof outline !== 'object') return [];
 
-  if (Array.isArray(outline?.sections)) {
+  if (Array.isArray(outline.layout) && outline.layout.length) {
+    return outline.layout.map((block, idx) => ({
+      key: block?.id || block?.key || `section_${idx + 1}`,
+      spec: block,
+    }));
+  }
+
+  if (Array.isArray(outline.sections) && outline.sections.length) {
     return outline.sections.map((section, idx) => ({
-      key: section?.id || section?.key || section?.name || `section_${idx + 1}`,
+      key: section?.id || section?.key || `section_${idx + 1}`,
       spec: section,
     }));
-  }
-
-  if (Array.isArray(outline)) {
-    return outline.map((section, idx) => ({
-      key: section?.id || section?.key || section?.name || `section_${idx + 1}`,
-      spec: section,
-    }));
-  }
-
-  if (typeof outline === 'object') {
-    return Object.entries(outline).map(([key, spec]) => ({ key, spec }));
   }
 
   return [];
@@ -203,6 +199,11 @@ router.post('/start', async (req, res, next) => {
     }
 
     const sectionEntries = deriveSections(outline);
+    if (!sectionEntries.length) {
+      return res
+        .status(502)
+        .json({ error: 'LLM_PLAN_NO_SECTIONS', details: JSON.stringify(outline).slice(0, 800) });
+    }
     const jobId = randomUUID();
 
     jobs.set(jobId, {
@@ -253,10 +254,15 @@ router.get('/stream', async (req, res, next) => {
     });
 
     const failStream = (err) => {
-      const message = err?.details || err?.message || 'STREAM_FAILED';
-      job.status = 'error';
-      sendSse(res, 'error', message);
-      if (canWrite(res)) res.end();
+      try {
+        const message = err?.details || err?.message || 'STREAM_FAILED';
+        job.status = 'error';
+        sendSse(res, 'error', message);
+      } catch {
+        // ignore
+      } finally {
+        if (canWrite(res)) res.end();
+      }
     };
 
     if (job.css) sendSse(res, 'css', { css: job.css });
@@ -271,6 +277,42 @@ router.get('/stream', async (req, res, next) => {
     if (job.status === 'done') {
       sendSse(res, 'done', { status: 'ready' });
       return res.end();
+    }
+
+    if (job.status === 'running') {
+      sendSse(res, 'info', { status: 'running' });
+      const ping = setInterval(() => {
+        if (!canWrite(res)) {
+          clearInterval(ping);
+          return;
+        }
+        res.write(': ping\n\n');
+      }, 20000);
+
+      const watcher = setInterval(() => {
+        if (!canWrite(res)) {
+          clearInterval(watcher);
+          return;
+        }
+        if (job.status === 'done') {
+          sendSse(res, 'done', { status: 'ready' });
+          res.end();
+          clearInterval(watcher);
+          clearInterval(ping);
+        }
+        if (job.status === 'error') {
+          sendSse(res, 'error', 'STREAM_FAILED');
+          res.end();
+          clearInterval(watcher);
+          clearInterval(ping);
+        }
+      }, 1000);
+
+      req.on('close', () => {
+        clearInterval(ping);
+        clearInterval(watcher);
+      });
+      return;
     }
 
     job.status = 'running';
@@ -307,6 +349,7 @@ router.get('/stream', async (req, res, next) => {
         const sectionSpec = job.sectionSpecs?.[key] ?? job.outline?.[key];
         const sectionPrompt = [
           `Сгенерируй HTML секцию "${key}" по плану ниже.`,
+          `Разметка должна содержать единственный корневой <section id="${key}">.`,
           'Верни только разметку секции без <html>, <head>, <body> и без стилей.',
           'Учитывай пользовательский запрос:',
           job.prompt,
@@ -324,6 +367,12 @@ router.get('/stream', async (req, res, next) => {
         });
 
         const sectionHtml = cleanHtmlFragment(sectionText);
+        if (!sectionHtml.includes('<section') || !sectionHtml.includes(`id="${key}"`)) {
+          throw Object.assign(new Error('LLM_SECTION_INVALID'), {
+            status: 502,
+            details: sectionHtml.slice(0, 400),
+          });
+        }
         job.sections[key] = sectionHtml;
         sendSse(res, 'section', { id: key, html: sectionHtml });
       }
