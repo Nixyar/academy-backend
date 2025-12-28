@@ -58,13 +58,24 @@ const cleanHtmlFragment = (html) => {
   return cleaned.trim();
 };
 
+const canWrite = (res) => res && !res.writableEnded && !res.writableFinished && !res.destroyed;
+
 const sendSse = (res, event, payload) => {
-  if (res.writableEnded) return;
-  res.write(`event: ${event}\n`);
-  const data = typeof payload === 'string' ? payload : JSON.stringify(payload);
-  data.split(/\r?\n/).forEach((line) => res.write(`data: ${line}\n`));
-  res.write('\n');
-  if (typeof res.flush === 'function') res.flush();
+  if (!canWrite(res)) return;
+
+  try {
+    const normalized = payload === undefined ? '' : payload;
+    const data = typeof normalized === 'string' ? normalized : JSON.stringify(normalized);
+    const safeData = typeof data === 'string' ? data : '';
+
+    res.write(`event: ${event}\n`);
+    safeData.split(/\r?\n/).forEach((line) => res.write(`data: ${line}\n`));
+    res.write('\n');
+    if (typeof res.flush === 'function') res.flush();
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error('Failed to write SSE chunk', err);
+  }
 };
 
 const deriveSections = (outline) => {
@@ -209,6 +220,7 @@ router.post('/start', async (req, res, next) => {
 
 router.get('/stream', async (req, res, next) => {
   let job;
+  let streamStarted = false;
 
   try {
     const { jobId } = req.query || {};
@@ -224,6 +236,7 @@ router.get('/stream', async (req, res, next) => {
       Connection: 'keep-alive',
     });
     res.flushHeaders?.();
+    streamStarted = true;
 
     let aborted = false;
     req.on('close', () => {
@@ -234,9 +247,7 @@ router.get('/stream', async (req, res, next) => {
       const message = err?.details || err?.message || 'STREAM_FAILED';
       job.status = 'error';
       sendSse(res, 'error', message);
-      if (!res.writableEnded) {
-        res.end();
-      }
+      if (canWrite(res)) res.end();
     };
 
     if (job.css) sendSse(res, 'css', job.css);
@@ -341,11 +352,19 @@ router.get('/stream', async (req, res, next) => {
     return res.end();
   } catch (e) {
     // eslint-disable-next-line no-console
-    console.error(e);
+    console.error('HTML stream failed', e);
     if (job) {
       job.status = 'error';
     }
-    return next(e);
+    if (streamStarted) {
+      sendSse(res, 'error', e?.details || e?.message || 'STREAM_FAILED');
+      if (canWrite(res)) res.end();
+      return;
+    }
+
+    return res
+      .status(e?.status || 500)
+      .json({ error: 'STREAM_FAILED', details: e?.details || e?.message || null });
   }
 });
 
