@@ -7,13 +7,27 @@ const router = Router();
 
 const jobs = new Map(); // Map<jobId, { status, outline, css, sections, html }>
 
-const CSS_SYSTEM_SUFFIX = "Ты генерируешь только CSS. Запрещено: HTML/JSON/markdown/<style>.";
-const SECTION_SYSTEM_SUFFIX = [
-  "Ты генерируешь только HTML фрагмент одной секции.",
-  "Строго: <section id='{ID}'>...</section>.",
-  "Запрещено: <html>,<head>,<body>,<main>,<style>,<script>,<title>, JSON, markdown.",
-  'Не экранируй кавычки в атрибутах, не используй \\\".',
-].join(' ');
+const CSS_SYSTEM_SUFFIX = `
+Ты генерируешь только CSS.
+Запрещено: HTML, JSON, markdown, <style>.
+Верни чистый CSS-текст.
+`;
+const SECTION_SYSTEM_SUFFIX = `
+Ты генерируешь только HTML фрагмент ОДНОЙ секции.
+Формат строго:
+<section id="{ID}"> ... </section>
+
+Запрещено: <html>, <head>, <body>, <main>, <style>, <script>, <title>, JSON, markdown.
+Не экранируй кавычки в атрибутах (никаких \\" внутри HTML).
+`;
+
+const escapeHtml = (str) =>
+  String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 
 const stripFences = (s) =>
   String(s || '')
@@ -64,6 +78,93 @@ const cleanHtmlFragment = (html) => {
   const bodyMatch = cleaned.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
   if (bodyMatch) return bodyMatch[1].trim();
   return cleaned.trim();
+};
+
+const tryExtractHtmlField = (text) => {
+  const obj = extractFirstJsonObject(text);
+  if (obj && typeof obj === 'object' && typeof obj.html === 'string') return obj.html;
+  return null;
+};
+
+const tryParseJsonString = (text) => {
+  try {
+    const parsed = JSON.parse(text);
+    return typeof parsed === 'string' ? parsed : null;
+  } catch {
+    return null;
+  }
+};
+
+const decodeEscapes = (value) => {
+  let current = String(value || '');
+  for (let i = 0; i < 3; i += 1) {
+    const next = current
+      .replace(/\\n/g, '\n')
+      .replace(/\\t/g, '\t')
+      .replace(/\\"/g, '"')
+      .replace(/\\'/g, "'")
+      .replace(/\\\\/g, '\\');
+    if (next === current) break;
+    current = next;
+  }
+  return current;
+};
+
+// LLM иногда отдаёт HTML с \" и \\n — приводим к нормальному виду
+const normalizeLlmHtml = (raw) => {
+  let s = String(raw || '');
+
+  // если это JSON вида {"html":"<section ...>"} — достаём поле html
+  const fromJson = tryExtractHtmlField(s);
+  if (fromJson) s = fromJson;
+
+  // если это строка в JSON-формате ("<section ...>") — парсим
+  const parsedString = tryParseJsonString(s.trim());
+  if (parsedString) s = parsedString;
+
+  // разэкранируем типовые последовательности (несколько проходов)
+  s = decodeEscapes(s);
+
+  return s;
+};
+
+const stripStyleTags = (html) => String(html || '').replace(/<style[\s\S]*?<\/style>/gi, '').trim();
+
+// опционально: если хочешь максимально "чистый" HTML без inline стилей
+const stripInlineStyleAttrs = (html) =>
+  String(html || '')
+    // style="..."
+    .replace(/\sstyle\s*=\s*"[^"]*"/gi, '')
+    // style='...'
+    .replace(/\sstyle\s*=\s*'[^']*'/gi, '')
+    .trim();
+
+const hasSectionWithId = (html, id) => {
+  const re = new RegExp(
+    `<section\\b[^>]*\\bid\\s*=\\s*(?:"${id}"|'${id}'|${id})\\b[^>]*>`,
+    'i',
+  );
+  return re.test(html);
+};
+
+const isValidSection = (html, id) => {
+  if (typeof html !== 'string') return false;
+  const s = html.trim();
+  if (!s.toLowerCase().includes('<section')) return false;
+  if (!s.toLowerCase().includes('</section>')) return false;
+  return hasSectionWithId(s, id);
+};
+
+const sectionDiagnostics = (html, id) => {
+  const s = String(html || '');
+  const sample = s.replace(/[<>]/g, '').slice(0, 120);
+  return {
+    id,
+    hasSectionTag: /<section\b/i.test(s),
+    hasClose: /<\/section>/i.test(s),
+    hasId: hasSectionWithId(s, id),
+    sample,
+  };
 };
 
 const canWrite = (res) => res && !res.writableEnded && !res.writableFinished && !res.destroyed;
@@ -352,20 +453,26 @@ router.get('/stream', async (req, res, next) => {
 
     try {
       if (!job.css) {
+        const cssCtx = {
+          title: job.outline?.title,
+          lang: job.outline?.lang,
+          theme: job.outline?.theme,
+          constraints: job.outline?.constraints,
+        };
+
         const cssPrompt = [
-          'Сгенерируй полный CSS для страницы по плану ниже.',
-          'Верни только CSS, без markdown, без html и без тегов <style>.',
+          'Сгенерируй полный CSS для страницы.',
           'Учитывай пользовательский запрос:',
           job.prompt,
-          'План (JSON):',
-          JSON.stringify(job.outline),
+          'Контекст (JSON):',
+          JSON.stringify(cssCtx),
         ].join('\n');
 
         const cssText = await callLlm({
           system: `${job.renderSystem}\n\n${CSS_SYSTEM_SUFFIX}`,
           prompt: cssPrompt,
-          temperature: 0.4,
-          maxTokens: 2048,
+          temperature: 0.2,
+          maxTokens: 1800,
         });
 
         job.css = cleanCss(cssText);
@@ -378,46 +485,47 @@ router.get('/stream', async (req, res, next) => {
 
       for (const key of sectionsToGenerate) {
         const sectionSpec = job.sectionSpecs?.[key] ?? job.outline?.[key];
-        const minimalPlan = {
+        const sectionCtx = {
           title: job.outline?.title,
           theme: job.outline?.theme,
           constraints: job.outline?.constraints,
-          lang: job.outline?.lang,
         };
-        const sectionPrompt = [
-          `Сгенерируй HTML секцию "${key}" по плану ниже.`,
-          `Разметка должна содержать единственный корневой <section id="${key}">.`,
-          'Верни только разметку секции без <html>, <head>, <body> и без стилей.',
-          'Учитывай пользовательский запрос:',
-          job.prompt,
-          'Краткий план:',
-          JSON.stringify(minimalPlan),
-          'Детали секции:',
-          JSON.stringify(sectionSpec ?? {}),
-        ].join('\n');
+        const sectionPrompt = `
+User request:
+${job.prompt}
+
+Global context (JSON):
+${JSON.stringify(sectionCtx)}
+
+Section spec (JSON):
+${JSON.stringify(sectionSpec ?? {})}
+
+Return ONLY:
+<section id="${key}">...</section>
+`;
 
         const sectionText = await callLlm({
           system: `${job.renderSystem}\n\n${SECTION_SYSTEM_SUFFIX.replace('{ID}', key)}`,
           prompt: sectionPrompt,
           temperature: 0.15,
-          maxTokens: 2200,
+          maxTokens: 2000,
         });
 
-        const validateSection = (html) =>
-          typeof html === 'string' &&
-          html.includes('<section') &&
-          html.includes(`id="${key}"`) &&
-          html.includes('</section>');
+        let sectionHtml = cleanHtmlFragment(normalizeLlmHtml(sectionText));
+        sectionHtml = stripStyleTags(sectionHtml);
+        // опционально:
+        sectionHtml = stripInlineStyleAttrs(sectionHtml);
 
-        let sectionHtml = cleanHtmlFragment(sectionText);
+        if (!isValidSection(sectionHtml, key)) {
+          const repairPrompt = `
+Исправь HTML так, чтобы он был строго:
+<section id="${key}"> ... </section>
 
-        if (!validateSection(sectionHtml)) {
-          const repairPrompt = [
-            `Исправь результат так, чтобы он был строго: <section id="${key}"> ... </section>.`,
-            'Верни только исправленный HTML.',
-            'Исходный фрагмент:',
-            sectionHtml,
-          ].join('\n');
+Запрещено: markdown/JSON, любые другие теги-обёртки.
+Верни только исправленный HTML.
+Исходник:
+${sectionHtml}
+`;
 
           const repairedText = await callLlm({
             system: `${job.renderSystem}\n\n${SECTION_SYSTEM_SUFFIX.replace('{ID}', key)}`,
@@ -426,13 +534,17 @@ router.get('/stream', async (req, res, next) => {
             maxTokens: 1500,
           });
 
-          sectionHtml = cleanHtmlFragment(repairedText);
+          sectionHtml = cleanHtmlFragment(normalizeLlmHtml(repairedText));
+          sectionHtml = stripStyleTags(sectionHtml);
+          // опционально:
+          sectionHtml = stripInlineStyleAttrs(sectionHtml);
 
-          if (!validateSection(sectionHtml)) {
-            throw Object.assign(new Error('LLM_SECTION_INVALID'), {
-              status: 502,
-              details: sectionHtml.slice(0, 400),
+          if (!isValidSection(sectionHtml, key)) {
+            failStream({
+              message: 'LLM_SECTION_INVALID',
+              details: JSON.stringify(sectionDiagnostics(sectionHtml, key)),
             });
+            return;
           }
         }
         job.sections[key] = sectionHtml;
@@ -443,25 +555,27 @@ router.get('/stream', async (req, res, next) => {
       return;
     }
 
-    const assembledSections = (job.sectionOrder || Object.keys(job.sections)).map(
-      (key) => job.sections[key] || '',
+    const assembledSections = (job.sectionOrder || Object.keys(job.sections)).map((key) =>
+      job.sections[key] ? job.sections[key] : '',
     );
 
-    const finalHtml = [
-      '<!DOCTYPE html>',
-      `<html lang="${job.outline?.lang || 'ru'}">`,
-      '<head>',
-      '<meta charset="UTF-8" />',
-      '<meta name="viewport" content="width=device-width, initial-scale=1.0" />',
-      '<style>',
-      job.css || '',
-      '</style>',
-      '</head>',
-      '<body>',
-      ...assembledSections,
-      '</body>',
-      '</html>',
-    ].join('\n');
+    const lang = job.outline?.lang || 'ru';
+    const title = job.outline?.title || 'Site';
+
+    const finalHtml = `<!DOCTYPE html>
+<html lang="${lang}">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>${escapeHtml(title)}</title>
+<style>
+${job.css || ''}
+</style>
+</head>
+<body>
+${assembledSections.join('\n\n')}
+</body>
+</html>`;
 
     job.html = finalHtml;
     job.status = 'done';
