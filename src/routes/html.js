@@ -174,6 +174,55 @@ const buildFallbackSection = (id, spec) => {
   return `<section id="${id}"><div class="section-fallback">${body}</div></section>`;
 };
 
+const fallbackCss = `:root {
+  --color-bg: #0b1021;
+  --color-card: #121a33;
+  --color-text: #e3e9ff;
+  --color-accent: #5de4c7;
+  --color-muted: #9aa4c2;
+  --radius: 16px;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  padding: 32px;
+  font-family: "Inter", system-ui, -apple-system, sans-serif;
+  background: radial-gradient(circle at 10% 20%, #14204a, #0b1021 40%), #0b1021;
+  color: var(--color-text);
+}
+h1,h2,h3,p { margin: 0 0 12px 0; }
+.section-fallback {
+  background: linear-gradient(135deg, rgba(93, 228, 199, 0.08), rgba(93, 228, 199, 0.02));
+  border: 1px solid rgba(93, 228, 199, 0.18);
+  border-radius: var(--radius);
+  padding: 24px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+}`;
+
+const ensureFallbackCss = (job, res) => {
+  if (job.css) return;
+  job.css = fallbackCss;
+  sendSse(res, 'css', { css: job.css });
+};
+
+const ensureFallbackSections = (job, res) => {
+  const keys =
+    job.sectionOrder?.length
+      ? job.sectionOrder
+      : Object.keys(job.sectionSpecs || job.outline?.layout || {}) || [];
+
+  const effectiveKeys = keys.length ? keys : ['section_1'];
+
+  effectiveKeys.forEach((key, idx) => {
+    if (job.sections[key]) return;
+    const spec = job.sectionSpecs?.[key] || job.outline?.layout?.[idx] || job.outline?.[key];
+    const fallback = buildFallbackSection(key, spec);
+    const safe = isValidSection(fallback, key) ? fallback : forceWrapSection(fallback, key);
+    job.sections[key] = safe;
+    sendSse(res, 'section', { id: key, html: safe });
+  });
+};
+
 const sectionDiagnostics = (html, id) => {
   const s = String(html || '');
   const sample = s.replace(/[<>]/g, '').slice(0, 120);
@@ -573,8 +622,9 @@ ${sectionHtml}
         sendSse(res, 'section', { id: key, html: sectionHtml });
       }
     } catch (err) {
-      failStream(err);
-      return;
+      // Если LLM сломался — отправляем фолбэки и всё равно завершаем
+      ensureFallbackCss(job, res);
+      ensureFallbackSections(job, res);
     }
 
     const assembledSections = (job.sectionOrder || Object.keys(job.sections)).map((key) =>
