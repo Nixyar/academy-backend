@@ -5,6 +5,7 @@ import env from './config/env.js';
 import authRouter from './routes/auth.js';
 import meRouter from './routes/me.js';
 import llmRouter from './routes/llm.js';
+import htmlRouter from './routes/html.js';
 import contentRouter from './routes/content.js';
 import progressRouter from './routes/progress.js';
 
@@ -40,6 +41,7 @@ api.get('/health', (req, res) => {
 api.use('/auth', authRouter);
 api.use('/me', meRouter);
 api.use('/lessons', llmRouter);
+api.use('/v1/html', htmlRouter);
 api.use('/', progressRouter);
 api.use('/rest/v1', contentRouter);
 
