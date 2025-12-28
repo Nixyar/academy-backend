@@ -161,6 +161,19 @@ const forceWrapSection = (html, id) => {
   return `<section id="${id}">${withoutSections}</section>`;
 };
 
+const buildFallbackSection = (id, spec) => {
+  const heading =
+    spec?.title || spec?.heading || spec?.label || spec?.name || `Section ${id || ''}`.trim();
+  const desc = spec?.description || spec?.summary || '';
+  const body = [
+    `<h2>${escapeHtml(heading)}</h2>`,
+    desc ? `<p>${escapeHtml(desc)}</p>` : '',
+  ]
+    .filter(Boolean)
+    .join('\n');
+  return `<section id="${id}"><div class="section-fallback">${body}</div></section>`;
+};
+
 const sectionDiagnostics = (html, id) => {
   const s = String(html || '');
   const sample = s.replace(/[<>]/g, '').slice(0, 120);
@@ -549,14 +562,18 @@ ${sectionHtml}
             const forced = forceWrapSection(sectionHtml, key);
 
             if (!isValidSection(forced, key)) {
-              failStream({
-                message: 'LLM_SECTION_INVALID',
-                details: JSON.stringify(sectionDiagnostics(sectionHtml, key)),
-              });
-              return;
+              const fallback = buildFallbackSection(key, sectionSpec);
+              if (!isValidSection(fallback, key)) {
+                failStream({
+                  message: 'LLM_SECTION_INVALID',
+                  details: JSON.stringify(sectionDiagnostics(sectionHtml, key)),
+                });
+                return;
+              }
+              sectionHtml = fallback;
+            } else {
+              sectionHtml = forced;
             }
-
-            sectionHtml = forced;
           }
         }
         job.sections[key] = sectionHtml;
