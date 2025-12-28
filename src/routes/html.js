@@ -86,6 +86,30 @@ const tryExtractHtmlField = (text) => {
   return null;
 };
 
+const tryParseJsonString = (text) => {
+  try {
+    const parsed = JSON.parse(text);
+    return typeof parsed === 'string' ? parsed : null;
+  } catch {
+    return null;
+  }
+};
+
+const decodeEscapes = (value) => {
+  let current = String(value || '');
+  for (let i = 0; i < 3; i += 1) {
+    const next = current
+      .replace(/\\n/g, '\n')
+      .replace(/\\t/g, '\t')
+      .replace(/\\"/g, '"')
+      .replace(/\\'/g, "'")
+      .replace(/\\\\/g, '\\');
+    if (next === current) break;
+    current = next;
+  }
+  return current;
+};
+
 // LLM иногда отдаёт HTML с \" и \\n — приводим к нормальному виду
 const normalizeLlmHtml = (raw) => {
   let s = String(raw || '');
@@ -94,13 +118,12 @@ const normalizeLlmHtml = (raw) => {
   const fromJson = tryExtractHtmlField(s);
   if (fromJson) s = fromJson;
 
-  // разэкранируем типовые последовательности
-  s = s
-    .replace(/\\n/g, '\n')
-    .replace(/\\t/g, '\t')
-    .replace(/\\"/g, '"')
-    .replace(/\\'/g, "'")
-    .replace(/\\\\/g, '\\');
+  // если это строка в JSON-формате ("<section ...>") — парсим
+  const parsedString = tryParseJsonString(s.trim());
+  if (parsedString) s = parsedString;
+
+  // разэкранируем типовые последовательности (несколько проходов)
+  s = decodeEscapes(s);
 
   return s;
 };
