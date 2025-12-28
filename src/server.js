@@ -12,22 +12,43 @@ import progressRouter from './routes/progress.js';
 const app = express();
 
 const corsAllowlist = env.webOrigins.map((origin) => origin.trim());
+const allowAllLocalhost = env.nodeEnv !== 'production';
 
-app.use(cors({
+const isAllowedOrigin = (origin) => {
+  if (!origin) return true;
+
+  const normalized = origin.trim();
+  if (corsAllowlist.includes(normalized)) return true;
+
+  if (allowAllLocalhost && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(normalized)) {
+    return true;
+  }
+
+  return false;
+};
+
+const corsMiddleware = cors({
   origin: (origin, callback) => {
-    if (!origin) {
+    if (isAllowedOrigin(origin)) {
       return callback(null, true);
     }
 
-    const normalizedOrigin = origin.trim();
-
-    if (corsAllowlist.includes(normalizedOrigin)) {
-      return callback(null, true);
-    }
-
-    return callback(new Error('Not allowed by CORS'));
+    const err = new Error('Not allowed by CORS');
+    err.status = 403;
+    return callback(err);
   },
   credentials: true,
+});
+
+app.use((req, res, next) => corsMiddleware(req, res, (err) => {
+  if (err && err.message === 'Not allowed by CORS') {
+    return res.status(err.status || 403).json({
+      error: 'CORS_NOT_ALLOWED',
+      origin: req.headers.origin || null,
+    });
+  }
+
+  return next(err);
 }));
 app.use(express.json());
 app.use(cookieParser());
