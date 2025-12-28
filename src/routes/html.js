@@ -660,9 +660,33 @@ ${assembledSections.join('\n\n')}
   } catch (e) {
     // eslint-disable-next-line no-console
     console.error('HTML stream failed', e);
-    if (job) {
-      job.status = 'error';
+    if (job && !job.sections) job.sections = {};
+
+    // Попытаться отправить фолбэк-поток даже если ошибка случилась до начала SSE
+    try {
+      if (!streamStarted) {
+        res.set({
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          Connection: 'keep-alive',
+        });
+        res.flushHeaders?.();
+        streamStarted = true;
+      }
+
+      if (job) {
+        ensureFallbackCss(job, res);
+        ensureFallbackSections(job, res);
+        job.status = 'done';
+        sendSse(res, 'done', { status: 'ready' });
+        if (canWrite(res)) res.end();
+        return;
+      }
+    } catch (fallbackErr) {
+      // eslint-disable-next-line no-console
+      console.error('HTML stream fallback failed', fallbackErr);
     }
+
     if (streamStarted) {
       const looksLikeHtml = typeof e?.details === 'string' && /<[^>]+>/.test(e.details);
       const code = e?.message || 'STREAM_FAILED';
