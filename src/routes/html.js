@@ -7,13 +7,27 @@ const router = Router();
 
 const jobs = new Map(); // Map<jobId, { status, outline, css, sections, html }>
 
-const CSS_SYSTEM_SUFFIX = "Ты генерируешь только CSS. Запрещено: HTML/JSON/markdown/<style>.";
-const SECTION_SYSTEM_SUFFIX = [
-  "Ты генерируешь только HTML фрагмент одной секции.",
-  "Строго: <section id='{ID}'>...</section>.",
-  "Запрещено: <html>,<head>,<body>,<main>,<style>,<script>,<title>, JSON, markdown.",
-  'Не экранируй кавычки в атрибутах, не используй \\\".',
-].join(' ');
+const CSS_SYSTEM_SUFFIX = `
+Ты генерируешь только CSS.
+Запрещено: HTML, JSON, markdown, <style>.
+Верни чистый CSS-текст.
+`;
+const SECTION_SYSTEM_SUFFIX = `
+Ты генерируешь только HTML фрагмент ОДНОЙ секции.
+Формат строго:
+<section id="{ID}"> ... </section>
+
+Запрещено: <html>, <head>, <body>, <main>, <style>, <script>, <title>, JSON, markdown.
+Не экранируй кавычки в атрибутах (никаких \\" внутри HTML).
+`;
+
+const escapeHtml = (str) =>
+  String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 
 const stripFences = (s) =>
   String(s || '')
@@ -352,20 +366,26 @@ router.get('/stream', async (req, res, next) => {
 
     try {
       if (!job.css) {
+        const cssCtx = {
+          title: job.outline?.title,
+          lang: job.outline?.lang,
+          theme: job.outline?.theme,
+          constraints: job.outline?.constraints,
+        };
+
         const cssPrompt = [
-          'Сгенерируй полный CSS для страницы по плану ниже.',
-          'Верни только CSS, без markdown, без html и без тегов <style>.',
+          'Сгенерируй полный CSS для страницы.',
           'Учитывай пользовательский запрос:',
           job.prompt,
-          'План (JSON):',
-          JSON.stringify(job.outline),
+          'Контекст (JSON):',
+          JSON.stringify(cssCtx),
         ].join('\n');
 
         const cssText = await callLlm({
           system: `${job.renderSystem}\n\n${CSS_SYSTEM_SUFFIX}`,
           prompt: cssPrompt,
-          temperature: 0.4,
-          maxTokens: 2048,
+          temperature: 0.2,
+          maxTokens: 1800,
         });
 
         job.css = cleanCss(cssText);
@@ -378,46 +398,50 @@ router.get('/stream', async (req, res, next) => {
 
       for (const key of sectionsToGenerate) {
         const sectionSpec = job.sectionSpecs?.[key] ?? job.outline?.[key];
-        const minimalPlan = {
+        const sectionCtx = {
           title: job.outline?.title,
           theme: job.outline?.theme,
           constraints: job.outline?.constraints,
-          lang: job.outline?.lang,
         };
-        const sectionPrompt = [
-          `Сгенерируй HTML секцию "${key}" по плану ниже.`,
-          `Разметка должна содержать единственный корневой <section id="${key}">.`,
-          'Верни только разметку секции без <html>, <head>, <body> и без стилей.',
-          'Учитывай пользовательский запрос:',
-          job.prompt,
-          'Краткий план:',
-          JSON.stringify(minimalPlan),
-          'Детали секции:',
-          JSON.stringify(sectionSpec ?? {}),
-        ].join('\n');
+        const sectionPrompt = `
+User request:
+${job.prompt}
+
+Global context (JSON):
+${JSON.stringify(sectionCtx)}
+
+Section spec (JSON):
+${JSON.stringify(sectionSpec ?? {})}
+
+Return ONLY:
+<section id="${key}">...</section>
+`;
 
         const sectionText = await callLlm({
           system: `${job.renderSystem}\n\n${SECTION_SYSTEM_SUFFIX.replace('{ID}', key)}`,
           prompt: sectionPrompt,
           temperature: 0.15,
-          maxTokens: 2200,
+          maxTokens: 2000,
         });
 
-        const validateSection = (html) =>
+        const isValidSection = (html, id) =>
           typeof html === 'string' &&
           html.includes('<section') &&
-          html.includes(`id="${key}"`) &&
+          html.includes(`id="${id}"`) &&
           html.includes('</section>');
 
         let sectionHtml = cleanHtmlFragment(sectionText);
 
-        if (!validateSection(sectionHtml)) {
-          const repairPrompt = [
-            `Исправь результат так, чтобы он был строго: <section id="${key}"> ... </section>.`,
-            'Верни только исправленный HTML.',
-            'Исходный фрагмент:',
-            sectionHtml,
-          ].join('\n');
+        if (!isValidSection(sectionHtml, key)) {
+          const repairPrompt = `
+Исправь HTML так, чтобы он был строго:
+<section id="${key}"> ... </section>
+
+Запрещено: markdown/JSON, любые другие теги-обёртки.
+Верни только исправленный HTML.
+Исходник:
+${sectionHtml}
+`;
 
           const repairedText = await callLlm({
             system: `${job.renderSystem}\n\n${SECTION_SYSTEM_SUFFIX.replace('{ID}', key)}`,
@@ -428,11 +452,9 @@ router.get('/stream', async (req, res, next) => {
 
           sectionHtml = cleanHtmlFragment(repairedText);
 
-          if (!validateSection(sectionHtml)) {
-            throw Object.assign(new Error('LLM_SECTION_INVALID'), {
-              status: 502,
-              details: sectionHtml.slice(0, 400),
-            });
+          if (!isValidSection(sectionHtml, key)) {
+            failStream({ message: 'LLM_SECTION_INVALID', details: 'INVALID_SECTION_HTML' });
+            return;
           }
         }
         job.sections[key] = sectionHtml;
@@ -443,25 +465,27 @@ router.get('/stream', async (req, res, next) => {
       return;
     }
 
-    const assembledSections = (job.sectionOrder || Object.keys(job.sections)).map(
-      (key) => job.sections[key] || '',
+    const assembledSections = (job.sectionOrder || Object.keys(job.sections)).map((key) =>
+      job.sections[key] ? job.sections[key] : '',
     );
 
-    const finalHtml = [
-      '<!DOCTYPE html>',
-      `<html lang="${job.outline?.lang || 'ru'}">`,
-      '<head>',
-      '<meta charset="UTF-8" />',
-      '<meta name="viewport" content="width=device-width, initial-scale=1.0" />',
-      '<style>',
-      job.css || '',
-      '</style>',
-      '</head>',
-      '<body>',
-      ...assembledSections,
-      '</body>',
-      '</html>',
-    ].join('\n');
+    const lang = job.outline?.lang || 'ru';
+    const title = job.outline?.title || 'Site';
+
+    const finalHtml = `<!DOCTYPE html>
+<html lang="${lang}">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>${escapeHtml(title)}</title>
+<style>
+${job.css || ''}
+</style>
+</head>
+<body>
+${assembledSections.join('\n\n')}
+</body>
+</html>`;
 
     job.html = finalHtml;
     job.status = 'done';
