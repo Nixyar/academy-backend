@@ -80,6 +80,17 @@ const cleanHtmlFragment = (html) => {
   return cleaned.trim();
 };
 
+const stripStyleTags = (html) => String(html || '').replace(/<style[\s\S]*?<\/style>/gi, '').trim();
+
+// опционально: если хочешь максимально "чистый" HTML без inline стилей
+const stripInlineStyleAttrs = (html) =>
+  String(html || '')
+    // style="..."
+    .replace(/\sstyle\s*=\s*"[^"]*"/gi, '')
+    // style='...'
+    .replace(/\sstyle\s*=\s*'[^']*'/gi, '')
+    .trim();
+
 const canWrite = (res) => res && !res.writableEnded && !res.writableFinished && !res.destroyed;
 
 const sendSse = (res, event, payload) => {
@@ -431,6 +442,9 @@ Return ONLY:
           html.includes('</section>');
 
         let sectionHtml = cleanHtmlFragment(sectionText);
+        sectionHtml = stripStyleTags(sectionHtml);
+        // опционально:
+        sectionHtml = stripInlineStyleAttrs(sectionHtml);
 
         if (!isValidSection(sectionHtml, key)) {
           const repairPrompt = `
@@ -451,6 +465,9 @@ ${sectionHtml}
           });
 
           sectionHtml = cleanHtmlFragment(repairedText);
+          sectionHtml = stripStyleTags(sectionHtml);
+          // опционально:
+          sectionHtml = stripInlineStyleAttrs(sectionHtml);
 
           if (!isValidSection(sectionHtml, key)) {
             failStream({ message: 'LLM_SECTION_INVALID', details: 'INVALID_SECTION_HTML' });
