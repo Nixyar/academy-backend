@@ -155,6 +155,12 @@ const isValidSection = (html, id) => {
   return hasSectionWithId(s, id);
 };
 
+const forceWrapSection = (html, id) => {
+  const sanitized = stripInlineStyleAttrs(stripStyleTags(String(html || '')));
+  const withoutSections = sanitized.replace(/<\/?section[^>]*>/gi, '').trim();
+  return `<section id="${id}">${withoutSections}</section>`;
+};
+
 const sectionDiagnostics = (html, id) => {
   const s = String(html || '');
   const sample = s.replace(/[<>]/g, '').slice(0, 120);
@@ -540,11 +546,17 @@ ${sectionHtml}
           sectionHtml = stripInlineStyleAttrs(sectionHtml);
 
           if (!isValidSection(sectionHtml, key)) {
-            failStream({
-              message: 'LLM_SECTION_INVALID',
-              details: JSON.stringify(sectionDiagnostics(sectionHtml, key)),
-            });
-            return;
+            const forced = forceWrapSection(sectionHtml, key);
+
+            if (!isValidSection(forced, key)) {
+              failStream({
+                message: 'LLM_SECTION_INVALID',
+                details: JSON.stringify(sectionDiagnostics(sectionHtml, key)),
+              });
+              return;
+            }
+
+            sectionHtml = forced;
           }
         }
         job.sections[key] = sectionHtml;
