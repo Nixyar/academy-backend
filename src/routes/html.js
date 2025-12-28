@@ -134,12 +134,13 @@ const isValidSection = (html, id) => {
 
 const sectionDiagnostics = (html, id) => {
   const s = String(html || '');
+  const sample = s.replace(/[<>]/g, '').slice(0, 120);
   return {
     id,
     hasSectionTag: /<section\b/i.test(s),
     hasClose: /<\/section>/i.test(s),
     hasId: hasSectionWithId(s, id),
-    sample: s.slice(0, 120),
+    sample,
   };
 };
 
