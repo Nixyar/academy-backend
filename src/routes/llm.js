@@ -55,20 +55,33 @@ router.post('/:lessonId/llm', async (req, res, next) => {
 
     const { data: lesson, error: lessonError } = await supabaseAdmin
       .from('lessons')
-      .select('id, llm_plan_system_prompt, llm_render_system_prompt')
+      .select('*')
       .eq('id', lessonId)
       .maybeSingle();
 
-    if (lessonError) return res.status(500).json({ error: 'FAILED_TO_FETCH_LESSON' });
+    if (lessonError) {
+      return res.status(500).json({
+        error: 'FAILED_TO_FETCH_LESSON',
+        details: lessonError.message,
+      });
+    }
     if (!lesson) return res.status(404).json({ error: 'LESSON_NOT_FOUND' });
 
-    const planSystem = lesson.llm_plan_system_prompt;
-    const renderSystem = lesson.llm_render_system_prompt;
+    const fallbackSystem = typeof lesson.llm_system_prompt === 'string' ? lesson.llm_system_prompt : null;
+    const planSystem = (
+      typeof lesson.llm_plan_system_prompt === 'string' ? lesson.llm_plan_system_prompt : null
+    ) || fallbackSystem;
+    const renderSystem = (
+      typeof lesson.llm_render_system_prompt === 'string' ? lesson.llm_render_system_prompt : null
+    ) || fallbackSystem;
 
-    if (typeof planSystem !== 'string' || !planSystem.trim()) {
+    const normalizedPlan = typeof planSystem === 'string' ? planSystem.trim() : '';
+    const normalizedRender = typeof renderSystem === 'string' ? renderSystem.trim() : '';
+
+    if (!normalizedPlan) {
       return res.status(400).json({ error: 'LESSON_LLM_PLAN_SYSTEM_PROMPT_MISSING' });
     }
-    if (typeof renderSystem !== 'string' || !renderSystem.trim()) {
+    if (!normalizedRender) {
       return res.status(400).json({ error: 'LESSON_LLM_RENDER_SYSTEM_PROMPT_MISSING' });
     }
 
@@ -76,7 +89,7 @@ router.post('/:lessonId/llm', async (req, res, next) => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        system: planSystem,
+        system: normalizedPlan,
         prompt: prompt.trim(),
         temperature: 0.6,
         maxTokens: 4096,
@@ -108,7 +121,7 @@ router.post('/:lessonId/llm', async (req, res, next) => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        system: renderSystem,
+        system: normalizedRender,
         prompt: renderPrompt,
         temperature: 0.3,
         maxTokens: 8192,

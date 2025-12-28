@@ -105,13 +105,14 @@ const deriveSections = (outline) => {
 const fetchLessonPrompts = async (lessonId) => {
   const { data: lesson, error } = await supabaseAdmin
     .from('lessons')
-    .select('id, llm_plan_system_prompt, llm_render_system_prompt')
+    .select('*')
     .eq('id', lessonId)
     .maybeSingle();
 
   if (error) {
     const err = new Error('FAILED_TO_FETCH_LESSON');
     err.status = 500;
+    err.details = error.message;
     throw err;
   }
   if (!lesson) {
@@ -120,21 +121,29 @@ const fetchLessonPrompts = async (lessonId) => {
     throw err;
   }
 
-  const planSystem = lesson.llm_plan_system_prompt;
-  const renderSystem = lesson.llm_render_system_prompt;
+  const fallbackSystem = typeof lesson.llm_system_prompt === 'string' ? lesson.llm_system_prompt : null;
+  const planSystem = (
+    typeof lesson.llm_plan_system_prompt === 'string' ? lesson.llm_plan_system_prompt : null
+  ) || fallbackSystem;
+  const renderSystem = (
+    typeof lesson.llm_render_system_prompt === 'string' ? lesson.llm_render_system_prompt : null
+  ) || fallbackSystem;
 
-  if (typeof planSystem !== 'string' || !planSystem.trim()) {
+  const normalizedPlan = typeof planSystem === 'string' ? planSystem.trim() : '';
+  const normalizedRender = typeof renderSystem === 'string' ? renderSystem.trim() : '';
+
+  if (!normalizedPlan) {
     const err = new Error('LESSON_LLM_PLAN_SYSTEM_PROMPT_MISSING');
     err.status = 400;
     throw err;
   }
-  if (typeof renderSystem !== 'string' || !renderSystem.trim()) {
+  if (!normalizedRender) {
     const err = new Error('LESSON_LLM_RENDER_SYSTEM_PROMPT_MISSING');
     err.status = 400;
     throw err;
   }
 
-  return { planSystem, renderSystem };
+  return { planSystem: normalizedPlan, renderSystem: normalizedRender };
 };
 
 const callLlm = async ({ system, prompt, temperature, maxTokens }) => {
