@@ -91,6 +91,22 @@ const stripInlineStyleAttrs = (html) =>
     .replace(/\sstyle\s*=\s*'[^']*'/gi, '')
     .trim();
 
+const hasSectionWithId = (html, id) => {
+  const re = new RegExp(
+    `<section\\b[^>]*\\bid\\s*=\\s*(?:"${id}"|'${id}'|${id})\\b[^>]*>`,
+    'i',
+  );
+  return re.test(html);
+};
+
+const isValidSection = (html, id) => {
+  if (typeof html !== 'string') return false;
+  const s = html.trim();
+  if (!s.toLowerCase().includes('<section')) return false;
+  if (!s.toLowerCase().includes('</section>')) return false;
+  return hasSectionWithId(s, id);
+};
+
 const canWrite = (res) => res && !res.writableEnded && !res.writableFinished && !res.destroyed;
 
 const sendSse = (res, event, payload) => {
@@ -434,12 +450,6 @@ Return ONLY:
           temperature: 0.15,
           maxTokens: 2000,
         });
-
-        const isValidSection = (html, id) =>
-          typeof html === 'string' &&
-          html.includes('<section') &&
-          html.includes(`id="${id}"`) &&
-          html.includes('</section>');
 
         let sectionHtml = cleanHtmlFragment(sectionText);
         sectionHtml = stripStyleTags(sectionHtml);
