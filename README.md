@@ -46,9 +46,17 @@ The API will start on `PORT` (defaults to `3000` in `.env.example`).
   - Loads the lesson by `id` from Supabase and reads `llm_system_prompt`.
   - Proxies to configured `LLM_API_URL` with `{ prompt, system: llm_system_prompt, temperature: 0.2, maxTokens: 1024 }`.
   - Response mirrors the upstream LLM: `{ text, model, usage: { promptTokens, completionTokens } }`; returns `404 { error: 'LESSON_NOT_FOUND' }` if the lesson is missing, `400 { error: 'LESSON_LLM_SYSTEM_PROMPT_MISSING' }` if the field is empty, or `502 { error: 'LLM_REQUEST_FAILED' }` if upstream fails.
+- HTML streaming (lesson-scoped prompts from Supabase):
+  - `POST /api/v1/html/start` with body `{ prompt, lessonId }`
+    - Calls the plan system prompt, parses outline JSON, creates an in-memory job (`Map<jobId, { status, outline, css, sections, html }>`), returns `{ jobId, outline }`.
+  - `GET /api/v1/html/stream?jobId=...` (SSE)
+    - Generates CSS once, then each section per outline entry, assembling the final HTML.
+    - Events: `css` (plain CSS text), `section:<key>` (HTML fragment for that section), `done` (`ready` payload), `error` on failure. Replays already-generated parts if the stream is re-opened.
+  - `GET /api/v1/html/result?jobId=...`
+    - Returns cached `{ jobId, status, outline, css, sections, html }` for reloads/re-renders.
 - `POST /api/auth/session` with body `{ access_token, refresh_token }`
   - Saves `sb_access_token` (~1h) and `sb_refresh_token` (~30d) as httpOnly cookies
-    (`sameSite=lax`, `secure` depends on `COOKIE_SECURE/NODE_ENV`).
+  (`sameSite=lax`, `secure` depends on `COOKIE_SECURE/NODE_ENV`).
   - Response: `{ ok: true }`.
 - `POST /api/auth/login` with body `{ email, password }`
   - Authenticates via Supabase email/password and stores access/refresh tokens in cookies.
