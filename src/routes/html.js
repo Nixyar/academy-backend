@@ -5,7 +5,7 @@ import supabaseAdmin from '../lib/supabaseAdmin.js';
 
 const router = Router();
 
-const jobs = new Map(); // Map<jobId, { status, outline, css, sections, html }>
+const jobs = new Map(); // Map<jobId, { status, outline, css, sections, html, debug }>
 
 const CSS_SYSTEM_SUFFIX = `
 Ты генерируешь только CSS.
@@ -254,6 +254,27 @@ const sendSse = (res, event, payload) => {
   }
 };
 
+const recordDebug = (job, entry) => {
+  if (!job) return;
+  if (!job.debug) job.debug = [];
+
+  const normalized = {
+    ...entry,
+    prompt: typeof entry.prompt === 'string' ? entry.prompt : undefined,
+    response:
+      typeof entry.response === 'string' ? entry.response : String(entry.response ?? ''),
+  };
+
+  job.debug.push(normalized);
+
+  const limit = 50;
+  if (job.debug.length > limit) {
+    job.debug = job.debug.slice(-limit);
+  }
+
+  return normalized;
+};
+
 const deriveSections = (outline) => {
   if (!outline || typeof outline !== 'object') return [];
 
@@ -393,6 +414,7 @@ router.post('/start', async (req, res, next) => {
       prompt: prompt.trim(),
       sectionOrder: sectionEntries.map(({ key }) => key),
       sectionSpecs: Object.fromEntries(sectionEntries.map(({ key, spec }) => [key, spec])),
+      debug: [],
     });
 
     return res.json({ jobId, outline });
@@ -411,7 +433,9 @@ router.get('/stream', async (req, res, next) => {
   let watcherInterval;
 
   try {
-    const { jobId } = req.query || {};
+    const { jobId, debug } = req.query || {};
+    const debugMode =
+      typeof debug === 'string' && ['1', 'true', 'yes', 'on'].includes(debug.toLowerCase());
     job = typeof jobId === 'string' ? jobs.get(jobId) : null;
 
     if (!job) {
@@ -466,6 +490,10 @@ router.get('/stream', async (req, res, next) => {
           replayed = true;
         }
       });
+    }
+
+    if (debugMode && job.debug?.length) {
+      job.debug.forEach((entry) => sendSse(res, 'debug', entry));
     }
 
     if (replayed || job.css) {
@@ -543,6 +571,13 @@ router.get('/stream', async (req, res, next) => {
           maxTokens: 1800,
         });
 
+        const cssDebugEntry = recordDebug(job, {
+          step: 'css',
+          prompt: cssPrompt,
+          response: cssText,
+        });
+        if (debugMode && cssDebugEntry) sendSse(res, 'debug', cssDebugEntry);
+
         job.css = cleanCss(cssText);
         sendSse(res, 'css', { css: job.css });
       }
@@ -579,6 +614,14 @@ Return ONLY:
           maxTokens: 2000,
         });
 
+        const sectionDebug = recordDebug(job, {
+          step: 'section',
+          id: key,
+          prompt: sectionPrompt,
+          response: sectionText,
+        });
+        if (debugMode && sectionDebug) sendSse(res, 'debug', sectionDebug);
+
         let sectionHtml = cleanHtmlFragment(normalizeLlmHtml(sectionText));
         sectionHtml = stripStyleTags(sectionHtml);
         // опционально:
@@ -601,6 +644,14 @@ ${sectionHtml}
             temperature: 0.05,
             maxTokens: 1500,
           });
+
+          const repairDebug = recordDebug(job, {
+            step: 'section_repair',
+            id: key,
+            prompt: repairPrompt,
+            response: repairedText,
+          });
+          if (debugMode && repairDebug) sendSse(res, 'debug', repairDebug);
 
           sectionHtml = cleanHtmlFragment(normalizeLlmHtml(repairedText));
           sectionHtml = stripStyleTags(sectionHtml);
@@ -706,8 +757,10 @@ ${assembledSections.join('\n\n')}
 });
 
 router.get('/result', (req, res) => {
-  const { jobId } = req.query || {};
+  const { jobId, debug } = req.query || {};
   const job = typeof jobId === 'string' ? jobs.get(jobId) : null;
+  const debugMode =
+    typeof debug === 'string' && ['1', 'true', 'yes', 'on'].includes(debug.toLowerCase());
 
   if (!job) {
     return res.status(404).json({ error: 'JOB_NOT_FOUND' });
@@ -720,6 +773,7 @@ router.get('/result', (req, res) => {
     css: job.css,
     sections: job.sections,
     html: job.html,
+    debug: debugMode ? job.debug || [] : undefined,
   });
 });
 
