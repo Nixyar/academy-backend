@@ -128,39 +128,6 @@ const normalizeLlmHtml = (raw) => {
   return s;
 };
 
-const stripStyleTags = (html) => String(html || '').replace(/<style[\s\S]*?<\/style>/gi, '').trim();
-
-// опционально: если хочешь максимально "чистый" HTML без inline стилей
-const stripInlineStyleAttrs = (html) =>
-  String(html || '')
-    // style="..."
-    .replace(/\sstyle\s*=\s*"[^"]*"/gi, '')
-    // style='...'
-    .replace(/\sstyle\s*=\s*'[^']*'/gi, '')
-    .trim();
-
-const hasSectionWithId = (html, id) => {
-  const re = new RegExp(
-    `<section\\b[^>]*\\bid\\s*=\\s*(?:"${id}"|'${id}'|${id})\\b[^>]*>`,
-    'i',
-  );
-  return re.test(html);
-};
-
-const isValidSection = (html, id) => {
-  if (typeof html !== 'string') return false;
-  const s = html.trim();
-  if (!s.toLowerCase().includes('<section')) return false;
-  if (!s.toLowerCase().includes('</section>')) return false;
-  return hasSectionWithId(s, id);
-};
-
-const forceWrapSection = (html, id) => {
-  const sanitized = stripInlineStyleAttrs(stripStyleTags(String(html || '')));
-  const withoutSections = sanitized.replace(/<\/?section[^>]*>/gi, '').trim();
-  return `<section id="${id}">${withoutSections}</section>`;
-};
-
 const buildFallbackSection = (id, spec) => {
   const heading =
     spec?.title || spec?.heading || spec?.label || spec?.name || `Section ${id || ''}`.trim();
@@ -202,7 +169,7 @@ h1,h2,h3,p { margin: 0 0 12px 0; }
 const ensureFallbackCss = (job, res) => {
   if (job.css) return;
   job.css = fallbackCss;
-  sendSse(res, 'css', { css: job.css });
+  sendSse(res, 'css', { type: 'css', content: job.css, css: job.css });
 };
 
 const ensureFallbackSections = (job, res) => {
@@ -217,22 +184,9 @@ const ensureFallbackSections = (job, res) => {
     if (job.sections[key]) return;
     const spec = job.sectionSpecs?.[key] || job.outline?.layout?.[idx] || job.outline?.[key];
     const fallback = buildFallbackSection(key, spec);
-    const safe = isValidSection(fallback, key) ? fallback : forceWrapSection(fallback, key);
-    job.sections[key] = safe;
-    sendSse(res, 'section', { id: key, html: safe });
+    job.sections[key] = fallback;
+    sendSse(res, 'section', { type: 'section', id: key, html: fallback });
   });
-};
-
-const sectionDiagnostics = (html, id) => {
-  const s = String(html || '');
-  const sample = s.replace(/[<>]/g, '').slice(0, 120);
-  return {
-    id,
-    hasSectionTag: /<section\b/i.test(s),
-    hasClose: /<\/section>/i.test(s),
-    hasId: hasSectionWithId(s, id),
-    sample,
-  };
 };
 
 const canWrite = (res) => res && !res.writableEnded && !res.writableFinished && !res.destroyed;
@@ -471,7 +425,7 @@ router.get('/stream', async (req, res, next) => {
         const code = err?.message || 'STREAM_FAILED';
         const safeDetails = normalizeDetails(err?.details) || normalizeDetails(err?.message);
         job.status = 'error';
-        sendSse(res, 'error', { code, details: safeDetails || code });
+        sendSse(res, 'error', { type: 'error', code, details: safeDetails || code });
       } catch {
         // ignore
       } finally {
@@ -482,11 +436,11 @@ router.get('/stream', async (req, res, next) => {
     };
 
     let replayed = false;
-    if (job.css) sendSse(res, 'css', { css: job.css });
+    if (job.css) sendSse(res, 'css', { type: 'css', content: job.css, css: job.css });
     if (job.sectionOrder?.length) {
       job.sectionOrder.forEach((key) => {
         if (job.sections[key]) {
-          sendSse(res, 'section', { id: key, html: job.sections[key] });
+        sendSse(res, 'section', { type: 'section', id: key, html: job.sections[key] });
           replayed = true;
         }
       });
@@ -496,17 +450,12 @@ router.get('/stream', async (req, res, next) => {
       job.debug.forEach((entry) => sendSse(res, 'debug', entry));
     }
 
-    if (replayed || job.css) {
-      sendSse(res, 'info', { status: 'replayed' });
-    }
-
     if (job.status === 'done') {
-      sendSse(res, 'done', { status: 'ready' });
+      sendSse(res, 'done', { type: 'done' });
       return res.end();
     }
 
     if (job.status === 'running') {
-      sendSse(res, 'info', { status: 'running' });
       pingInterval = setInterval(() => {
         if (canWrite(res)) {
           res.write(': ping\n\n');
@@ -521,12 +470,12 @@ router.get('/stream', async (req, res, next) => {
           return;
         }
         if (job.status === 'done') {
-          sendSse(res, 'done', { status: 'ready' });
+          sendSse(res, 'done', { type: 'done' });
           res.end();
           clearInterval(watcherInterval);
           clearInterval(pingInterval);
         } else if (job.status === 'error') {
-          sendSse(res, 'error', { code: 'STREAM_FAILED', details: 'STREAM_FAILED' });
+          sendSse(res, 'error', { type: 'error', code: 'STREAM_FAILED', details: 'STREAM_FAILED' });
           res.end();
           clearInterval(watcherInterval);
           clearInterval(pingInterval);
@@ -537,8 +486,6 @@ router.get('/stream', async (req, res, next) => {
     }
 
     job.status = 'running';
-    sendSse(res, 'info', { status: 'running' });
-
     pingInterval = setInterval(() => {
       if (canWrite(res)) {
         res.write(': ping\n\n');
@@ -579,7 +526,7 @@ router.get('/stream', async (req, res, next) => {
         if (debugMode && cssDebugEntry) sendSse(res, 'debug', cssDebugEntry);
 
         job.css = cleanCss(cssText);
-        sendSse(res, 'css', { css: job.css });
+        sendSse(res, 'css', { type: 'css', content: job.css, css: job.css });
       }
 
       const sectionsToGenerate = job.sectionOrder?.length
@@ -622,55 +569,14 @@ Return ONLY:
         });
         if (debugMode && sectionDebug) sendSse(res, 'debug', sectionDebug);
 
-        let sectionHtml = cleanHtmlFragment(normalizeLlmHtml(sectionText));
-        sectionHtml = stripStyleTags(sectionHtml);
-        // опционально:
-        sectionHtml = stripInlineStyleAttrs(sectionHtml);
+        const sectionHtml = cleanHtmlFragment(normalizeLlmHtml(sectionText));
+        const finalSection =
+          typeof sectionHtml === 'string' && sectionHtml.trim()
+            ? sectionHtml
+            : buildFallbackSection(key, sectionSpec);
 
-        if (!isValidSection(sectionHtml, key)) {
-          const repairPrompt = `
-Исправь HTML так, чтобы он был строго:
-<section id="${key}"> ... </section>
-
-Запрещено: markdown/JSON, любые другие теги-обёртки.
-Верни только исправленный HTML.
-Исходник:
-${sectionHtml}
-`;
-
-          const repairedText = await callLlm({
-            system: `${job.renderSystem}\n\n${SECTION_SYSTEM_SUFFIX.replace('{ID}', key)}`,
-            prompt: repairPrompt,
-            temperature: 0.05,
-            maxTokens: 1500,
-          });
-
-          const repairDebug = recordDebug(job, {
-            step: 'section_repair',
-            id: key,
-            prompt: repairPrompt,
-            response: repairedText,
-          });
-          if (debugMode && repairDebug) sendSse(res, 'debug', repairDebug);
-
-          sectionHtml = cleanHtmlFragment(normalizeLlmHtml(repairedText));
-          sectionHtml = stripStyleTags(sectionHtml);
-          // опционально:
-          sectionHtml = stripInlineStyleAttrs(sectionHtml);
-
-          if (!isValidSection(sectionHtml, key)) {
-            const forced = forceWrapSection(sectionHtml, key);
-
-            if (!isValidSection(forced, key)) {
-              const fallback = buildFallbackSection(key, sectionSpec);
-              sectionHtml = isValidSection(fallback, key) ? fallback : forceWrapSection(fallback, key);
-            } else {
-              sectionHtml = forced;
-            }
-          }
-        }
-        job.sections[key] = sectionHtml;
-        sendSse(res, 'section', { id: key, html: sectionHtml });
+        job.sections[key] = finalSection;
+        sendSse(res, 'section', { type: 'section', id: key, html: finalSection });
       }
     } catch (err) {
       // Если LLM сломался — отправляем фолбэки и всё равно завершаем
@@ -703,7 +609,7 @@ ${assembledSections.join('\n\n')}
     job.html = finalHtml;
     job.status = 'done';
 
-    sendSse(res, 'done', { status: 'ready' });
+    sendSse(res, 'done', { type: 'done' });
     clearInterval(pingInterval);
     clearInterval(watcherInterval);
     if (canWrite(res)) res.end();
@@ -729,7 +635,7 @@ ${assembledSections.join('\n\n')}
         ensureFallbackCss(job, res);
         ensureFallbackSections(job, res);
         job.status = 'done';
-        sendSse(res, 'done', { status: 'ready' });
+        sendSse(res, 'done', { type: 'done' });
         if (canWrite(res)) res.end();
         return;
       }
@@ -745,7 +651,7 @@ ${assembledSections.join('\n\n')}
         looksLikeHtml || typeof e?.details !== 'string'
           ? code
           : e.details.trim().slice(0, 200) || code;
-      sendSse(res, 'error', { code, details: safeDetails });
+      sendSse(res, 'error', { type: 'error', code, details: safeDetails });
       if (canWrite(res)) res.end();
       return;
     }
