@@ -46,14 +46,17 @@ The API will start on `PORT` (defaults to `3000` in `.env.example`).
   - Loads the lesson by `id` from Supabase and reads `llm_system_prompt`.
   - Proxies to configured `LLM_API_URL` with `{ prompt, system: llm_system_prompt, temperature: 0.2, maxTokens: 1024 }`.
   - Response mirrors the upstream LLM: `{ text, model, usage: { promptTokens, completionTokens } }`; returns `404 { error: 'LESSON_NOT_FOUND' }` if the lesson is missing, `400 { error: 'LESSON_LLM_SYSTEM_PROMPT_MISSING' }` if the field is empty, or `502 { error: 'LLM_REQUEST_FAILED' }` if upstream fails.
-- HTML streaming (lesson-scoped prompts from Supabase):
+- HTML streaming (lesson-scoped prompts from Supabase; auth required):
   - `POST /api/v1/html/start` with body `{ prompt, lessonId }`
-    - Calls the plan system prompt, parses outline JSON, creates an in-memory job (`Map<jobId, { status, outline, css, sections, html }>`), returns `{ jobId, outline }`.
+    - Reads `user_id` from Supabase cookies, resolves `course_id` by `lessonId`.
+    - If an active `progress.active_job` for this course is queued/running → returns it (`{ already_running: true, jobId, status }`) without creating a new one.
+    - Otherwise creates a job (`{ already_running: false, jobId, status: 'running' }`), stores `active_job` + `prompt` + timestamps in `user_course_progress`, and kicks off LLM planning to build the in-memory job (`Map<jobId, ...>`).
+    - Atomically stores prompt + status; expects a partial unique index on `user_course_progress (user_id, course_id)` where `progress->'active_job' is not null` to protect against duplicates.
   - `GET /api/v1/html/stream?jobId=...` (SSE)
-    - Generates CSS once, then each section per outline entry, assembling the final HTML.
-    - Events: `css` (plain CSS text), `section:<key>` (HTML fragment for that section), `done` (`ready` payload), `error` on failure. Replays already-generated parts if the stream is re-opened.
+    - Only the owner can stream. Replays generated CSS/sections; on every SSE chunk writes a heartbeat (`progress.active_job.updatedAt`). On completion saves `progress.result.html` and marks `active_job.status='done'`.
+    - Events: `css`, `section`, `done`, `error`. Replays already-generated parts if the stream is re-opened.
   - `GET /api/v1/html/result?jobId=...`
-    - Returns cached `{ jobId, status, outline, css, sections, html }` for reloads/re-renders.
+    - Returns cached `{ jobId, status, outline, css, sections, html }` for reloads/re-renders (owner-only).
 - `POST /api/auth/session` with body `{ access_token, refresh_token }`
   - Saves `sb_access_token` (~1h) and `sb_refresh_token` (~30d) as httpOnly cookies
   (`sameSite=lax`, `secure` depends on `COOKIE_SECURE/NODE_ENV`).
@@ -87,17 +90,18 @@ The API will start on `PORT` (defaults to `3000` in `.env.example`).
   - Returns the profile JSON.
 - Progress (auth required, service role writes to `user_course_progress`):
   - `GET /api/courses/:courseId/progress`
-    - Returns `{ course_id, progress }`. Missing rows return an empty progress object.
+    - Returns `{ courseId, course_id, progress, updatedAt }`. Missing rows return an empty progress object.
+    - If `progress.active_job` is queued/running but heartbeat is stale (default TTL 5m), it is auto-marked as `failed`.
   - `PUT /api/courses/:courseId/progress`
     - Body: `{ progress: <object> }` or the progress object itself.
-    - Upserts progress for the user/course.
+    - Upserts progress for the user/course. Returns `{ courseId, course_id, progress, updatedAt }`.
   - `PATCH /api/courses/:courseId/progress`
     - Body: patch operation. Supported ops:
       - `quiz_answer`: `{ op: 'quiz_answer', lessonId, quizId, answer }` → stores answer under `progress.lessons[lessonId].quiz_answers[quizId]`.
       - `lesson_status`: `{ op: 'lesson_status', lessonId, status: 'in_progress'|'completed', completedAt? }`.
       - `set_resume`: `{ op: 'set_resume', lessonId }` → sets `resume_lesson_id` and `last_viewed_lesson_id`.
       - `touch_lesson`: `{ op: 'touch_lesson', lessonId }` → updates `last_viewed_lesson_id`.
-    - Server loads current progress, applies the patch, and upserts.
+    - Server loads current progress, applies the patch, and upserts. Returns `{ courseId, course_id, progress, updatedAt }`.
   - `GET /api/courses/:courseId/resume`
     - Response: `{ "lesson_id": "<id>|null" }`.
     - Picks `resume_lesson_id`/`last_viewed_lesson_id` if set; otherwise chooses the first incomplete lesson (by `sort_order`) or the first lesson if all are completed.

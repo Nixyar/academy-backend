@@ -2,6 +2,14 @@ import { Router } from 'express';
 import { randomUUID } from 'crypto';
 import env from '../config/env.js';
 import supabaseAdmin from '../lib/supabaseAdmin.js';
+import requireUser from '../middleware/requireUser.js';
+import {
+  ACTIVE_JOB_TTL_MS,
+  isActiveJobRunning,
+  loadCourseProgress,
+  mutateCourseProgress,
+  saveCourseProgress,
+} from '../lib/courseProgress.js';
 
 const router = Router();
 
@@ -293,7 +301,7 @@ const fetchLessonPrompts = async (lessonId) => {
     throw err;
   }
 
-  return { planSystem: normalizedPlan, renderSystem: normalizedRender };
+  return { planSystem: normalizedPlan, renderSystem: normalizedRender, lesson };
 };
 
 const callLlm = async ({ system, prompt, temperature, maxTokens }) => {
@@ -322,9 +330,65 @@ const callLlm = async ({ system, prompt, temperature, maxTokens }) => {
   return String(payload || '');
 };
 
-router.post('/start', async (req, res, next) => {
+const heartbeatActiveJob = async (job, extra = {}) => {
+  const now = new Date().toISOString();
+  await mutateCourseProgress(job.userId, job.courseId, (progress) => {
+    if (!progress.active_job || progress.active_job.jobId !== job.jobId) return null;
+    return {
+      ...progress,
+      active_job: {
+        ...progress.active_job,
+        ...extra,
+        updatedAt: now,
+      },
+    };
+  });
+};
+
+const completeActiveJob = async (job, status, result = {}) => {
+  const now = new Date().toISOString();
+  await mutateCourseProgress(job.userId, job.courseId, (progress) => {
+    if (!progress.active_job || progress.active_job.jobId !== job.jobId) return null;
+
+    const baseResult =
+      progress.result && typeof progress.result === 'object' && !Array.isArray(progress.result)
+        ? { ...progress.result }
+        : { html: null, meta: {} };
+
+    const meta = result.meta && typeof result.meta === 'object' ? result.meta : {};
+
+    return {
+      ...progress,
+      active_job: { ...progress.active_job, status, updatedAt: now },
+      result: {
+        html: result.html ?? baseResult.html ?? null,
+        meta: { ...baseResult.meta, ...meta },
+      },
+    };
+  });
+};
+
+const failActiveJob = async (job, code) =>
+  completeActiveJob(job, 'failed', {
+    meta: {
+      error: code || 'FAILED',
+    },
+  });
+
+const getLastHeartbeat = (activeJob, progressUpdatedAt) => {
+  const raw =
+    activeJob?.updatedAt || activeJob?.startedAt || progressUpdatedAt || activeJob?.started_at;
+  const ts = raw ? Date.parse(raw) : NaN;
+  return Number.isNaN(ts) ? null : ts;
+};
+
+router.post('/start', requireUser, async (req, res, next) => {
+  let jobId;
+  let courseId;
+
   try {
     const { prompt, lessonId } = req.body || {};
+    const { user } = req;
 
     if (typeof prompt !== 'string' || !prompt.trim()) {
       return res.status(400).json({ error: 'prompt is required' });
@@ -334,7 +398,63 @@ router.post('/start', async (req, res, next) => {
       return res.status(400).json({ error: 'lessonId is required' });
     }
 
-    const { planSystem, renderSystem } = await fetchLessonPrompts(lessonId);
+    const { planSystem, renderSystem, lesson } = await fetchLessonPrompts(lessonId);
+    courseId = lesson.course_id;
+
+    const { progress: currentProgress, updatedAt: progressUpdatedAt } = await loadCourseProgress(
+      user.id,
+      courseId,
+    );
+    const activeJob = currentProgress.active_job;
+    const existingJob = activeJob?.jobId ? jobs.get(activeJob.jobId) : null;
+    const lastHeartbeat = getLastHeartbeat(activeJob, progressUpdatedAt);
+    const isStale =
+      isActiveJobRunning(activeJob) &&
+      (!lastHeartbeat || Date.now() - lastHeartbeat > ACTIVE_JOB_TTL_MS || !existingJob);
+
+    if (isStale && activeJob) {
+      await saveCourseProgress(user.id, courseId, {
+        ...currentProgress,
+        active_job: {
+          ...activeJob,
+          status: 'failed',
+          updatedAt: new Date().toISOString(),
+          error: 'STALE_HEARTBEAT',
+        },
+      });
+    }
+
+    if (isActiveJobRunning(activeJob) && !isStale) {
+      return res.json({
+        already_running: true,
+        jobId: activeJob.jobId,
+        status: activeJob.status || 'running',
+      });
+    }
+
+    jobId = randomUUID();
+    const nowIso = new Date().toISOString();
+    const initialProgress = {
+      ...currentProgress,
+      active_job: {
+        jobId,
+        courseId,
+        lessonId,
+        status: 'queued',
+        prompt: prompt.trim(),
+        startedAt: nowIso,
+        updatedAt: nowIso,
+      },
+      result: {
+        html: null,
+        meta:
+          currentProgress.result && typeof currentProgress.result.meta === 'object'
+            ? { ...currentProgress.result.meta }
+            : {},
+      },
+    };
+
+    await saveCourseProgress(user.id, courseId, initialProgress);
 
     const outlineText = await callLlm({
       system: planSystem,
@@ -346,6 +466,7 @@ router.post('/start', async (req, res, next) => {
     const outline = extractFirstJsonObject(outlineText);
 
     if (!outline || typeof outline !== 'object') {
+      await failActiveJob({ userId: user.id, courseId, jobId }, 'LLM_PLAN_PARSE_FAILED');
       return res.status(502).json({
         error: 'LLM_PLAN_PARSE_FAILED',
         details: stripFences(String(outlineText || '')).slice(0, 800),
@@ -354,28 +475,37 @@ router.post('/start', async (req, res, next) => {
 
     const sectionEntries = deriveSections(outline);
     if (!sectionEntries.length) {
+      await failActiveJob({ userId: user.id, courseId, jobId }, 'LLM_PLAN_NO_SECTIONS');
       return res
         .status(502)
         .json({ error: 'LLM_PLAN_NO_SECTIONS', details: JSON.stringify(outline).slice(0, 800) });
     }
-    const jobId = randomUUID();
 
-    jobs.set(jobId, {
+    const jobPayload = {
       status: 'pending',
+      jobId,
       outline,
       css: null,
       sections: {},
       html: null,
       renderSystem,
       lessonId,
+      courseId,
+      userId: user.id,
       prompt: prompt.trim(),
       sectionOrder: sectionEntries.map(({ key }) => key),
       sectionSpecs: Object.fromEntries(sectionEntries.map(({ key, spec }) => [key, spec])),
       debug: [],
-    });
+    };
 
-    return res.json({ jobId, outline });
+    jobs.set(jobId, jobPayload);
+    await heartbeatActiveJob(jobPayload, { status: 'running' });
+
+    return res.json({ already_running: false, jobId, status: 'running', outline });
   } catch (e) {
+    if (jobId && courseId && req?.user?.id) {
+      await failActiveJob({ userId: req.user.id, courseId, jobId }, e?.message || 'FAILED');
+    }
     if (e?.status) {
       return res.status(e.status).json({ error: e.message, details: e.details });
     }
@@ -383,7 +513,7 @@ router.post('/start', async (req, res, next) => {
   }
 });
 
-router.get('/stream', async (req, res, next) => {
+router.get('/stream', requireUser, async (req, res, next) => {
   let job;
   let streamStarted = false;
   let pingInterval;
@@ -395,9 +525,18 @@ router.get('/stream', async (req, res, next) => {
       typeof debug === 'string' && ['1', 'true', 'yes', 'on'].includes(debug.toLowerCase());
     job = typeof jobId === 'string' ? jobs.get(jobId) : null;
 
-    if (!job) {
+    if (!job || job.userId !== req.user.id) {
       return res.status(404).json({ error: 'JOB_NOT_FOUND' });
     }
+
+    const persistHeartbeat = async (extra = {}) => {
+      try {
+        await heartbeatActiveJob(job, extra);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error('Failed to update job heartbeat', err);
+      }
+    };
 
     res.set({
       'Content-Type': 'text/event-stream',
@@ -414,7 +553,7 @@ router.get('/stream', async (req, res, next) => {
       clearInterval(watcherInterval);
     });
 
-    const failStream = (err) => {
+    const failStream = async (err) => {
       const normalizeDetails = (details) => {
         if (typeof details !== 'string') return null;
         const trimmed = details.trim();
@@ -429,6 +568,7 @@ router.get('/stream', async (req, res, next) => {
         const safeDetails = normalizeDetails(err?.details) || normalizeDetails(err?.message);
         job.status = 'error';
         sendSse(res, 'error', { type: 'error', code, details: safeDetails || code });
+        await failActiveJob(job, code);
       } catch {
         // ignore
       } finally {
@@ -439,19 +579,25 @@ router.get('/stream', async (req, res, next) => {
     };
 
     let replayed = false;
-    if (job.css) sendSse(res, 'css', { type: 'css', content: job.css, css: job.css });
+    if (job.css) {
+      sendSse(res, 'css', { type: 'css', content: job.css, css: job.css });
+      await persistHeartbeat();
+    }
     if (job.sectionOrder?.length) {
-      job.sectionOrder.forEach((key) => {
+      for (const key of job.sectionOrder) {
         if (job.sections[key]) {
-        sendSse(res, 'section', { type: 'section', id: key, html: job.sections[key] });
+          sendSse(res, 'section', { type: 'section', id: key, html: job.sections[key] });
+          await persistHeartbeat();
           replayed = true;
         }
-      });
+      }
     }
 
     if (debugMode && job.debug?.length) {
       job.debug.forEach((entry) => sendSse(res, 'debug', entry));
     }
+
+    await persistHeartbeat();
 
     if (job.status === 'done') {
       sendSse(res, 'done', { type: 'done' });
@@ -489,6 +635,7 @@ router.get('/stream', async (req, res, next) => {
     }
 
     job.status = 'running';
+    await persistHeartbeat({ status: 'running' });
     pingInterval = setInterval(() => {
       if (canWrite(res)) {
         res.write(': ping\n\n');
@@ -530,6 +677,7 @@ router.get('/stream', async (req, res, next) => {
 
         job.css = cleanCss(cssText);
         sendSse(res, 'css', { type: 'css', content: job.css, css: job.css });
+        await persistHeartbeat();
       }
 
       const sectionsToGenerate = job.sectionOrder?.length
@@ -583,6 +731,7 @@ Return ONLY:
 
         job.sections[key] = finalSection;
         sendSse(res, 'section', { type: 'section', id: key, html: finalSection });
+        await persistHeartbeat();
       }
     } catch (err) {
       // Если LLM сломался — отправляем фолбэки и всё равно завершаем
@@ -641,6 +790,7 @@ ${assembledSections.join('\n\n')}
     job.html = finalHtml;
     job.status = 'done';
 
+    await completeActiveJob(job, 'done', { html: finalHtml });
     sendSse(res, 'done', { type: 'done' });
     clearInterval(pingInterval);
     clearInterval(watcherInterval);
@@ -650,6 +800,10 @@ ${assembledSections.join('\n\n')}
     // eslint-disable-next-line no-console
     console.error('HTML stream failed', e);
     if (job && !job.sections) job.sections = {};
+    if (job) {
+      job.status = 'error';
+      await failActiveJob(job, e?.message || 'STREAM_FAILED');
+    }
 
     // Попытаться отправить фолбэк-поток даже если ошибка случилась до начала SSE
     try {
@@ -666,7 +820,8 @@ ${assembledSections.join('\n\n')}
       if (job) {
         ensureFallbackCss(job, res);
         ensureFallbackSections(job, res);
-        job.status = 'done';
+        const code = e?.message || 'STREAM_FAILED';
+        sendSse(res, 'error', { type: 'error', code, details: e?.details || code });
         sendSse(res, 'done', { type: 'done' });
         if (canWrite(res)) res.end();
         return;
@@ -694,13 +849,13 @@ ${assembledSections.join('\n\n')}
   }
 });
 
-router.get('/result', (req, res) => {
+router.get('/result', requireUser, (req, res) => {
   const { jobId, debug } = req.query || {};
   const job = typeof jobId === 'string' ? jobs.get(jobId) : null;
   const debugMode =
     typeof debug === 'string' && ['1', 'true', 'yes', 'on'].includes(debug.toLowerCase());
 
-  if (!job) {
+  if (!job || job.userId !== req.user.id) {
     return res.status(404).json({ error: 'JOB_NOT_FOUND' });
   }
 

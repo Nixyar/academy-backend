@@ -1,56 +1,21 @@
 import { Router } from 'express';
 import supabaseAdmin from '../lib/supabaseAdmin.js';
+import {
+  ACTIVE_JOB_TTL_MS,
+  isActiveJobRunning,
+  loadCourseProgress,
+  mutateCourseProgress,
+  normalizeProgress,
+  saveCourseProgress,
+} from '../lib/courseProgress.js';
 import requireUser from '../middleware/requireUser.js';
 
 const router = Router();
 
-const normalizeProgress = (progress) => {
-  if (!progress || typeof progress !== 'object' || Array.isArray(progress)) {
-    return { lessons: {} };
-  }
-
-  return {
-    ...progress,
-    lessons: progress.lessons && typeof progress.lessons === 'object' && !Array.isArray(progress.lessons)
-      ? { ...progress.lessons }
-      : {},
-  };
-};
-
-const loadCourseProgress = async (userId, courseId) => {
-  const { data, error } = await supabaseAdmin
-    .from('user_course_progress')
-    .select('progress')
-    .eq('user_id', userId)
-    .eq('course_id', courseId)
-    .maybeSingle();
-
-  if (error) {
-    throw new Error('FAILED_TO_FETCH_PROGRESS');
-  }
-
-  return normalizeProgress(data?.progress);
-};
-
-const saveCourseProgress = async (userId, courseId, progress) => {
-  const payload = {
-    user_id: userId,
-    course_id: courseId,
-    progress,
-    updated_at: new Date().toISOString(),
-  };
-
-  const { data, error } = await supabaseAdmin
-    .from('user_course_progress')
-    .upsert([payload], { onConflict: 'user_id,course_id' })
-    .select('course_id, progress')
-    .single();
-
-  if (error) {
-    throw new Error('FAILED_TO_SAVE_PROGRESS');
-  }
-
-  return normalizeProgress(data?.progress || progress || {});
+const getHeartbeatMs = (activeJob, fallbackUpdatedAt) => {
+  const raw = activeJob?.updatedAt || activeJob?.startedAt || fallbackUpdatedAt;
+  const parsed = raw ? Date.parse(raw) : NaN;
+  return Number.isNaN(parsed) ? null : parsed;
 };
 
 const ensureLessonNode = (progress, lessonId) => {
@@ -168,11 +133,36 @@ router.get('/courses/:courseId/progress', requireUser, async (req, res, next) =>
     const { courseId } = req.params;
     const { user } = req;
 
-    const progress = await loadCourseProgress(user.id, courseId);
+    let { progress, updatedAt } = await loadCourseProgress(user.id, courseId);
+
+    const activeJob = progress.active_job;
+    const lastHeartbeat = getHeartbeatMs(activeJob, updatedAt);
+    const isStale =
+      isActiveJobRunning(activeJob) &&
+      (!lastHeartbeat || Date.now() - lastHeartbeat > ACTIVE_JOB_TTL_MS);
+
+    if (isStale) {
+      const failed = await mutateCourseProgress(user.id, courseId, (draft) => {
+        if (!draft.active_job || draft.active_job.jobId !== activeJob.jobId) return null;
+        return {
+          ...draft,
+          active_job: {
+            ...draft.active_job,
+            status: 'failed',
+            updatedAt: new Date().toISOString(),
+            error: 'STALE_HEARTBEAT',
+          },
+        };
+      });
+      progress = failed.progress;
+      updatedAt = failed.updatedAt;
+    }
 
     return res.json({
+      courseId,
       course_id: courseId,
       progress,
+      updatedAt,
     });
   } catch (error) {
     if (error.message === 'FAILED_TO_FETCH_PROGRESS') {
@@ -194,11 +184,13 @@ router.put('/courses/:courseId/progress', requireUser, async (req, res, next) =>
     }
 
     const normalized = normalizeProgress(bodyProgress);
-    const saved = await saveCourseProgress(user.id, courseId, normalized);
+    const { progress: saved, updatedAt } = await saveCourseProgress(user.id, courseId, normalized);
 
     return res.json({
+      courseId,
       course_id: courseId,
       progress: saved,
+      updatedAt,
     });
   } catch (error) {
     if (error.message === 'FAILED_TO_SAVE_PROGRESS') {
@@ -215,18 +207,20 @@ router.patch('/courses/:courseId/progress', requireUser, async (req, res, next) 
     const { user } = req;
     const patch = req.body || {};
 
-    const current = await loadCourseProgress(user.id, courseId);
+    const { progress: current } = await loadCourseProgress(user.id, courseId);
     const result = applyPatch(current, patch);
 
     if (result.error) {
       return res.status(400).json({ error: result.error, details: result.details });
     }
 
-    const saved = await saveCourseProgress(user.id, courseId, result.progress);
+    const { progress: saved, updatedAt } = await saveCourseProgress(user.id, courseId, result.progress);
 
     return res.json({
+      courseId,
       course_id: courseId,
       progress: saved,
+      updatedAt,
     });
   } catch (error) {
     if (error.message === 'FAILED_TO_FETCH_PROGRESS') {
@@ -246,7 +240,7 @@ router.get('/courses/:courseId/resume', requireUser, async (req, res, next) => {
     const { courseId } = req.params;
     const { user } = req;
 
-    const progress = await loadCourseProgress(user.id, courseId);
+    const { progress } = await loadCourseProgress(user.id, courseId);
     const lessonsById = progress.lessons || {};
 
     const preferredResume = progress.resume_lesson_id
