@@ -206,6 +206,43 @@ router.patch('/courses/:courseId/progress', requireUser, async (req, res, next) 
     const { courseId } = req.params;
     const { user } = req;
     const patch = req.body || {};
+    const op = patch?.op;
+
+    if (!op) {
+      return res.status(400).json({ error: 'INVALID_PATCH', details: 'op is required' });
+    }
+
+    if (op === 'lesson_prompt') {
+      const { lessonId, prompt } = patch;
+
+      if (typeof lessonId !== 'string' || !lessonId.trim() || typeof prompt !== 'string' || !prompt.trim()) {
+        return res
+          .status(400)
+          .json({ error: 'INVALID_PATCH', details: 'lesson_prompt requires lessonId and prompt' });
+      }
+
+      const { error: rpcError } = await supabaseAdmin.rpc('set_lesson_prompt', {
+        p_user_id: user.id,
+        p_course_id: courseId,
+        p_lesson_id: lessonId,
+        p_prompt: prompt.trim(),
+      });
+
+      if (rpcError) {
+        return res
+          .status(500)
+          .json({ error: 'FAILED_TO_SAVE_LESSON_PROMPT', details: rpcError.message });
+      }
+
+      const { progress: saved, updatedAt } = await loadCourseProgress(user.id, courseId);
+
+      return res.json({
+        courseId,
+        course_id: courseId,
+        progress: saved,
+        updatedAt,
+      });
+    }
 
     const { progress: current } = await loadCourseProgress(user.id, courseId);
     const result = applyPatch(current, patch);
