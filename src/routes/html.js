@@ -350,6 +350,24 @@ const completeActiveJob = async (job, status, result = {}) => {
   await mutateCourseProgress(job.userId, job.courseId, (progress) => {
     if (!progress.active_job || progress.active_job.jobId !== job.jobId) return null;
 
+    const lastUpdatedByLessonId =
+      progress.active_job.last_updated_by_lesson_id ||
+      progress.active_job.lastUpdatedByLessonId ||
+      job.lessonId ||
+      progress.active_job.lessonId ||
+      progress.active_job.lesson_id ||
+      null;
+
+    const nextActiveJob = {
+      ...progress.active_job,
+      status,
+      updatedAt: now,
+    };
+
+    if (status === 'done') {
+      nextActiveJob.last_updated_by_lesson_id = lastUpdatedByLessonId;
+    }
+
     const baseResult =
       progress.result && typeof progress.result === 'object' && !Array.isArray(progress.result)
         ? { ...progress.result }
@@ -359,7 +377,7 @@ const completeActiveJob = async (job, status, result = {}) => {
 
     return {
       ...progress,
-      active_job: { ...progress.active_job, status, updatedAt: now },
+      active_job: nextActiveJob,
       result: {
         html: result.html ?? baseResult.html ?? null,
         meta: { ...baseResult.meta, ...meta },

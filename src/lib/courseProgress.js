@@ -12,6 +12,8 @@ const normalizeActiveJob = (activeJob) => {
   const lessonId = activeJob.lessonId || activeJob.lesson_id || null;
   const courseId = activeJob.courseId || activeJob.course_id || null;
   const status = activeJob.status || activeJob.state || null;
+  const lastUpdatedByLessonId =
+    activeJob.lastUpdatedByLessonId || activeJob.last_updated_by_lesson_id || null;
 
   return {
     jobId,
@@ -22,6 +24,7 @@ const normalizeActiveJob = (activeJob) => {
     startedAt: activeJob.startedAt || activeJob.started_at || null,
     updatedAt: activeJob.updatedAt || activeJob.updated_at || activeJob.heartbeat_at || null,
     lastEventId: activeJob.lastEventId || activeJob.last_event_id || null,
+    last_updated_by_lesson_id: lastUpdatedByLessonId,
   };
 };
 
@@ -109,4 +112,3 @@ export const mutateCourseProgress = async (userId, courseId, mutator) => {
 
   return saveCourseProgress(userId, courseId, next);
 };
-
