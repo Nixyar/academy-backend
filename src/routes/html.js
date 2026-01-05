@@ -416,73 +416,22 @@ router.post('/start', requireUser, async (req, res, next) => {
       return res.status(400).json({ error: 'lessonId is required' });
     }
 
-    // --- REZ: Edit/Create Mode Logic ---
-    let originalContent = null;
-    let planInstruction = '';
-    let renderInstruction = '';
+    // --- REZ: Context Injection ---
+    const fileList = Object.keys(files || {}).join(', ');
+    const currentCode = (files && target_file) ? files[target_file] : null;
 
-    // "Universal" behavior: we rely on mode and target_file.
-    // If files are provided and mode is edit, we load the content.
-    if (mode === 'edit' && files && target_file && typeof files === 'object') {
-      const existing = files[target_file];
-      if (typeof existing === 'string' && existing.trim()) {
-        originalContent = existing;
-      }
-    }
+    let context = `
+=== CONTEXT ===
+Existing files: ${fileList || 'None'}
+`;
 
-    if (mode === 'edit') {
-      if (originalContent) {
-        planInstruction = `
-=== EDIT MODE: ${target_file || 'Current File'} ===
-User wants to EDIT existing file: "${target_file}".
-Current Content:
-${originalContent}
-
-INSTRUCTIONS FOR PLANNER:
-1. Analyze the current content.
-2. Create an OUTLINE (JSON) for the UPDATED version of the file.
-3. Keep the same structure (sections) if possible, unless the user asks to change it.
-4. If it's a simple file, create a single 'root' section.
-==================================================
-`;
-        renderInstruction = `
-=== EDIT MODE: ${target_file || 'Current File'} ===
-Context (Original Content):
-${originalContent}
-
-INSTRUCTIONS:
-1. You are generating a part/section of the updated file "${target_file}".
-2. Use the original content as context.
-3. Return the FULL updated code for this section. Do NOT use placeholders like "<!-- rest of code -->".
-4. Format: Return a JSON object { "html": "..." }.
-==================================================
-`;
-      } else {
-        // Fallback if no content found
-        planInstruction = `
-=== EDIT MODE: ${target_file || 'Target File'} ===
-User wants to edit "${target_file}" but no content was provided.
-Treat as a new creation attempt for this filename.
-`;
-      }
-    } else if (mode === 'create') {
-      planInstruction = `
-=== CREATE MODE: ${target_file || 'New File'} ===
-User wants to CREATE a NEW file: "${target_file || 'unknown'}".
-INSTRUCTIONS:
-1. Create a detailed outline for a NEW file.
-2. Ignore any previous files.
-===================================
-`;
-      renderInstruction = `
-=== CREATE MODE: ${target_file || 'New File'} ===
-INSTRUCTIONS:
-1. Generate full code for this section.
-2. Return the FULL code. Do NOT use placeholders.
-3. Format: Return a JSON object { "html": "..." }.
-===================================
+    if (currentCode) {
+      context += `
+CURRENT CODE OF FILE "${target_file}":
+${currentCode}
 `;
     }
+    context += `=================\n`;
     // ----------------------------
 
     const { planSystem, renderSystem, lesson } = await fetchLessonPrompts(lessonId);
@@ -544,7 +493,7 @@ INSTRUCTIONS:
     await saveCourseProgress(user.id, courseId, initialProgress);
 
     const outlineText = await callLlm({
-      system: planSystem + '\n' + planInstruction,
+      system: context + planSystem,
       prompt: prompt.trim(),
       temperature: 0.6,
       maxTokens: 4096,
@@ -583,7 +532,7 @@ INSTRUCTIONS:
       sectionOrder: sectionEntries.map(({ key }) => key),
       sectionSpecs: Object.fromEntries(sectionEntries.map(({ key, spec }) => [key, spec])),
       debug: [],
-      editInstruction: renderInstruction, // Save for stream
+      context,
     };
 
     jobs.set(jobId, jobPayload);
@@ -750,7 +699,7 @@ router.get('/stream', requireUser, async (req, res, next) => {
         ].join('\n');
 
         const cssText = await callLlm({
-          system: `${job.renderSystem}\n\n${CSS_SYSTEM_SUFFIX}${job.editInstruction || ''}`,
+          system: `${job.renderSystem}\n\n${CSS_SYSTEM_SUFFIX}\n${job.context}`,
           prompt: cssPrompt,
           temperature: 0.2,
           maxTokens: 1800,
@@ -797,7 +746,7 @@ Return ONLY:
 `;
 
         const sectionText = await callLlm({
-          system: `${job.renderSystem}\n\n${SECTION_SYSTEM_SUFFIX.replace('{ID}', key)}${job.editInstruction || ''}`,
+          system: `${job.renderSystem}\n\n${SECTION_SYSTEM_SUFFIX.replace('{ID}', key)}\n${job.context}`,
           prompt: sectionPrompt,
           temperature: 0.15,
           maxTokens: 2000,

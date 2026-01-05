@@ -53,32 +53,29 @@ router.post('/:lessonId/llm', async (req, res, next) => {
       return res.status(400).json({ error: 'prompt is required' });
     }
 
-    // --- REZ: Edit Mode Logic ---
-    let originalContent = null;
-    let editInstruction = '';
+    // --- REZ: Context Injection ---
+    const fileList = Object.keys(files || {}).join(', ');
+    const currentCode = (files && target_file) ? files[target_file] : null;
 
-    if (mode === 'edit' && files && target_file && typeof files === 'object') {
-      const existing = files[target_file];
-      if (typeof existing === 'string' && existing.trim()) {
-        originalContent = existing;
-      }
-    }
+    let context = `
+=== CONTEXT ===
+Existing files: ${fileList || 'None'}
+`;
 
-    if (originalContent) {
-      editInstruction = `
-=== EDIT MODE ===
-User provided an existing file: "${target_file}".
-Current Content:
-${originalContent}
-
-INSTRUCTIONS:
-1. You are EDITING this file based on the User Request.
-2. Keep the existing structure and content where possible, unless asked to change.
-3. Apply changes intelligently.
-4. Return the FULL updated content.
-=================
+    if (currentCode) {
+      context += `
+CURRENT CODE OF FILE "${target_file}":
+${currentCode}
 `;
     }
+    context += `=================\n`;
+
+    const multiFileInstruction = `
+CRITICAL: You must return a JSON object where keys are filenames and values are the full updated HTML code.
+Example: { "index.html": "<!DOCTYPE html>...", "about.html": "<!DOCTYPE html>..." }
+If you need to update a file, include its full new content.
+If you need to create a new file, include it too.
+`;
     // ----------------------------
 
     const { data: lesson, error: lessonError } = await supabaseAdmin
@@ -113,11 +110,12 @@ INSTRUCTIONS:
       return res.status(400).json({ error: 'LESSON_LLM_RENDER_SYSTEM_PROMPT_MISSING' });
     }
 
+    // Plan request
     const planResp = await fetch(env.llmApiUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        system: normalizedPlan + editInstruction,
+        system: context + normalizedPlan,
         prompt: prompt.trim(),
         temperature: 0.6,
         maxTokens: 4096,
@@ -143,13 +141,18 @@ INSTRUCTIONS:
       });
     }
 
-    const renderPrompt = `Сгенерируй HTML по этому плану. План (JSON):\n${JSON.stringify(planObj)}`;
+    const renderPrompt = `Сгенерируй код файлов по плану.
+${context}
+План (JSON):
+${JSON.stringify(planObj)}
+
+${multiFileInstruction}`;
 
     const htmlResp = await fetch(env.llmApiUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        system: normalizedRender + editInstruction,
+        system: normalizedRender,
         prompt: renderPrompt,
         temperature: 0.3,
         maxTokens: 8192,
@@ -165,20 +168,18 @@ INSTRUCTIONS:
     }
 
     const htmlPayload = await htmlResp.json().catch(async () => ({ text: await htmlResp.text() }));
-    const directHtml = typeof htmlPayload?.html === 'string' ? htmlPayload.html : null;
-    const htmlText = typeof htmlPayload?.text === 'string' ? htmlPayload.text : null;
+    const htmlText = typeof htmlPayload?.text === 'string' ? htmlPayload.text : (typeof htmlPayload === 'string' ? htmlPayload : JSON.stringify(htmlPayload));
 
-    const htmlObj = directHtml ? { html: directHtml } : extractFirstJsonObject(htmlText);
-    const html = typeof htmlObj?.html === 'string' ? htmlObj.html : null;
+    const filesObj = extractFirstJsonObject(htmlText);
 
-    if (!html || !html.includes('</html>')) {
+    if (!filesObj || typeof filesObj !== 'object') {
       return res.status(502).json({
         error: 'LLM_RENDER_PARSE_FAILED',
-        details: stripFences(String(htmlText || directHtml || '')).slice(0, 800),
+        details: stripFences(String(htmlText || '')).slice(0, 800),
       });
     }
 
-    return res.json({ html, plan: planObj });
+    return res.json({ files: filesObj, plan: planObj });
   } catch (e) {
     return next(e);
   }
