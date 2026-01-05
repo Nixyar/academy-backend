@@ -47,11 +47,39 @@ const extractFirstJsonObject = (text) => {
 router.post('/:lessonId/llm', async (req, res, next) => {
   try {
     const { lessonId } = req.params;
-    const { prompt } = req.body || {};
+    const { prompt, mode, target_file, files } = req.body || {};
 
     if (typeof prompt !== 'string' || !prompt.trim()) {
       return res.status(400).json({ error: 'prompt is required' });
     }
+
+    // --- REZ: Edit Mode Logic ---
+    let originalContent = null;
+    let editInstruction = '';
+
+    if (mode === 'edit' && files && target_file && typeof files === 'object') {
+      const existing = files[target_file];
+      if (typeof existing === 'string' && existing.trim()) {
+        originalContent = existing;
+      }
+    }
+
+    if (originalContent) {
+      editInstruction = `
+=== EDIT MODE ===
+User provided an existing file: "${target_file}".
+Current Content:
+${originalContent}
+
+INSTRUCTIONS:
+1. You are EDITING this file based on the User Request.
+2. Keep the existing structure and content where possible, unless asked to change.
+3. Apply changes intelligently.
+4. Return the FULL updated content.
+=================
+`;
+    }
+    // ----------------------------
 
     const { data: lesson, error: lessonError } = await supabaseAdmin
       .from('lessons')
@@ -89,7 +117,7 @@ router.post('/:lessonId/llm', async (req, res, next) => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        system: normalizedPlan,
+        system: normalizedPlan + editInstruction,
         prompt: prompt.trim(),
         temperature: 0.6,
         maxTokens: 4096,
@@ -121,7 +149,7 @@ router.post('/:lessonId/llm', async (req, res, next) => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        system: normalizedRender,
+        system: normalizedRender + editInstruction,
         prompt: renderPrompt,
         temperature: 0.3,
         maxTokens: 8192,
