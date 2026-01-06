@@ -144,6 +144,7 @@ const normalizeLlmHtml = (raw) => {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const LLM_TIMEOUT_MS = 60_000;
+const LLM_ADD_PAGE_TIMEOUT_MS = 120_000;
 const LLM_RETRYABLE_STATUSES = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
 
 const isValidHtmlDocument = (html) => {
@@ -197,7 +198,14 @@ const isSafeHtmlFilename = (name) => {
   return /^[a-zA-Z0-9._-]+\.html$/.test(s);
 };
 
-const ensureHrefInHtml = (html, href, label) => {
+const inferLinkPlacement = (instruction) => {
+  const s = String(instruction || '').toLowerCase();
+  if (/(хедер|header|шапк|nav|меню|navbar)/i.test(s)) return 'header';
+  if (/(футер|footer)/i.test(s)) return 'footer';
+  return 'auto';
+};
+
+const ensureHrefInHtml = (html, href, label, opts = {}) => {
   const doc = String(html || '');
   const safeHref = String(href || '').replace(/"/g, '&quot;');
   const safeLabel = String(label || href || 'Open').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -206,17 +214,25 @@ const ensureHrefInHtml = (html, href, label) => {
   }
 
   const linkHtml =
-    `<a href="${safeHref}" style="display:inline-block;margin:12px 0;padding:10px 14px;border-radius:12px;` +
-    `background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.14);color:#e5e7eb;` +
+    `<a href="${safeHref}" style="display:inline-block;margin:8px 0;padding:8px 12px;border-radius:12px;` +
+    `font-size:14px;line-height:1.2;opacity:.92;` +
+    `background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.14);color:#e5e7eb;` +
     `text-decoration:none;font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,sans-serif">` +
     `${safeLabel}</a>`;
 
   // Prefer placing links into <nav> or <header> if present.
+  const placement = typeof opts.placement === 'string' ? opts.placement : 'auto';
+  if (placement === 'footer' && /<footer\b[^>]*>[\s\S]*<\/footer>/i.test(doc)) {
+    return doc.replace(/<\/footer>/i, `${linkHtml}\n</footer>`);
+  }
   if (/<nav\b[^>]*>[\s\S]*<\/nav>/i.test(doc)) {
     return doc.replace(/<\/nav>/i, `${linkHtml}\n</nav>`);
   }
   if (/<header\b[^>]*>[\s\S]*<\/header>/i.test(doc)) {
     return doc.replace(/<\/header>/i, `${linkHtml}\n</header>`);
+  }
+  if (placement === 'footer' && /<\/body\s*>/i.test(doc)) {
+    return doc.replace(/<\/body\s*>/i, `${linkHtml}\n</body>`);
   }
 
   if (/<body[^>]*>/i.test(doc)) {
@@ -522,8 +538,9 @@ const fetchLessonPrompts = async (lessonId) => {
   return { planSystem: normalizedPlan, renderSystem: normalizedRender, lesson };
 };
 
-const callLlm = async ({ system, prompt, temperature, maxTokens }) => {
+const callLlm = async ({ system, prompt, temperature, maxTokens, timeoutMs }) => {
   let lastError;
+  const timeout = typeof timeoutMs === 'number' && Number.isFinite(timeoutMs) ? timeoutMs : LLM_TIMEOUT_MS;
 
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
@@ -536,7 +553,7 @@ const callLlm = async ({ system, prompt, temperature, maxTokens }) => {
           temperature,
           maxTokens,
         }),
-        signal: AbortSignal.timeout(LLM_TIMEOUT_MS),
+        signal: AbortSignal.timeout(timeout),
       });
 
       if (!resp.ok) {
@@ -1244,7 +1261,7 @@ ${assembledSections.join('\n\n')}
     broadcastSse(job, 'done', { type: 'done', ...job.result });
   };
 
-  const runAddPageJob = async (job) => {
+	  const runAddPageJob = async (job) => {
     emitStatus(job, 'loading_progress', 'loading progress', 0.05);
     const { progress: current } = await loadCourseProgress(job.userId, job.courseId);
     if (!hasIndexHtmlInProgress(current)) {
@@ -1270,16 +1287,17 @@ ${assembledSections.join('\n\n')}
       'Старайся сохранить стиль и компоненты исходного сайта.',
     ].join('\n');
 
-    let system = genericSystem;
+	    let system = genericSystem;
 
-    if (job.lessonId) {
-      try {
-        const { renderSystem } = await fetchLessonPrompts(job.lessonId);
-        system = `${renderSystem}\n\n${genericSystem}`;
-      } catch {
-        // fall back to generic system prompt
-      }
-    }
+	    if (job.lessonId) {
+	      try {
+	        const { renderSystem } = await fetchLessonPrompts(job.lessonId);
+	        // If lesson render prompt is JSON-oriented, it conflicts with add_page (HTML output) — skip it.
+	        system = /json/i.test(renderSystem) ? genericSystem : `${renderSystem}\n\n${genericSystem}`;
+	      } catch {
+	        // fall back to generic system prompt
+	      }
+	    }
 
     const resolvedNewFile = pickUniqueFilename(
       toSafeHtmlFilename(job.instruction, 'page'),
@@ -1309,12 +1327,13 @@ ${assembledSections.join('\n\n')}
       '- Добавь на странице ссылку назад на index.html (можно в nav или сверху).',
     ].join('\n');
 
-    const newPageText = await callLlm({
-      system,
-      prompt,
-      temperature: 0.2,
-      maxTokens: 4096,
-    });
+	    const newPageText = await callLlm({
+	      system,
+	      prompt,
+	      temperature: 0.2,
+	      maxTokens: 3000,
+	      timeoutMs: LLM_ADD_PAGE_TIMEOUT_MS,
+	    });
 
     emitStatus(job, 'validating', 'validating llm output', 0.6);
     const nextNew = stripFences(normalizeLlmHtml(newPageText));
@@ -1326,7 +1345,8 @@ ${assembledSections.join('\n\n')}
     }
 
     const newTitle = extractHtmlTitle(nextNew);
-    const stitchedIndex = ensureHrefInHtml(indexHtml, resolvedNewFile, newTitle || 'Открыть страницу');
+	    const placement = inferLinkPlacement(job.instruction);
+	    const stitchedIndex = ensureHrefInHtml(indexHtml, resolvedNewFile, newTitle || 'Открыть страницу', { placement });
     const stitchedNew = ensureHrefInHtml(nextNew, 'index.html', 'Назад');
 
     const tooLarge = ensureHtmlWithinLimit({ 'index.html': stitchedIndex, [resolvedNewFile]: stitchedNew });
