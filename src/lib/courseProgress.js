@@ -33,11 +33,31 @@ export const normalizeProgress = (progress) => {
     return { lessons: {}, result: { html: null, meta: {} }, active_job: null };
   }
 
+  const resultRaw =
+    progress.result && typeof progress.result === 'object' && !Array.isArray(progress.result)
+      ? progress.result
+      : null;
+
+  const normalizeFiles = (files) => {
+    if (!files || typeof files !== 'object' || Array.isArray(files)) return null;
+    const next = {};
+    Object.entries(files).forEach(([name, content]) => {
+      if (typeof name !== 'string' || !name.trim()) return;
+      next[name] = typeof content === 'string' ? content : String(content ?? '');
+    });
+    return next;
+  };
+
   const normalizedResult = progress.result && typeof progress.result === 'object' && !Array.isArray(progress.result)
     ? {
-        html: progress.result.html ?? null,
-        meta: progress.result.meta && typeof progress.result.meta === 'object' && !Array.isArray(progress.result.meta)
-          ? { ...progress.result.meta }
+        html: resultRaw?.html ?? null,
+        files: normalizeFiles(resultRaw?.files) ?? undefined,
+        active_file:
+          typeof resultRaw?.active_file === 'string'
+            ? resultRaw.active_file
+            : (typeof resultRaw?.activeFile === 'string' ? resultRaw.activeFile : undefined),
+        meta: resultRaw?.meta && typeof resultRaw.meta === 'object' && !Array.isArray(resultRaw.meta)
+          ? { ...resultRaw.meta }
           : {},
       }
     : { html: null, meta: {} };

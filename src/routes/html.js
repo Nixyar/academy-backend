@@ -10,6 +10,7 @@ import {
   mutateCourseProgress,
   saveCourseProgress,
 } from '../lib/courseProgress.js';
+import { ensureWorkspace, pickNextPageFilename } from '../lib/htmlWorkspace.js';
 
 const router = Router();
 
@@ -137,6 +138,25 @@ const normalizeLlmHtml = (raw) => {
   s = decodeEscapes(s);
 
   return s;
+};
+
+const isValidHtmlDocument = (html) => {
+  const s = String(html || '');
+  if (s.includes('```')) return false;
+  if (s.trim().length <= 300) return false;
+  if (!/(<!doctype\s+html|<html\b)/i.test(s)) return false;
+  return true;
+};
+
+const toWorkspaceResponse = (progress) => {
+  const workspace = ensureWorkspace(progress);
+  return {
+    result: {
+      files: workspace.result.files,
+      active_file: workspace.result.active_file,
+      meta: workspace.result.meta,
+    },
+  };
 };
 
 const buildFallbackSection = (id, spec) => {
@@ -375,14 +395,28 @@ const completeActiveJob = async (job, status, result = {}) => {
 
     const meta = result.meta && typeof result.meta === 'object' ? result.meta : {};
 
-    return {
+    const nextProgress = {
       ...progress,
       active_job: nextActiveJob,
       result: {
+        ...baseResult,
         html: result.html ?? baseResult.html ?? null,
-        meta: { ...baseResult.meta, ...meta },
+        meta: { ...(baseResult.meta || {}), ...meta },
       },
     };
+
+    // Back-compat: keep result.html, but also keep multi-page workspace when possible
+    const withWorkspace = ensureWorkspace(nextProgress);
+    if (withWorkspace.result?.files && typeof withWorkspace.result.html === 'string') {
+      const active = withWorkspace.result.active_file || 'index.html';
+      if (withWorkspace.result.files[active]) {
+        withWorkspace.result.html = withWorkspace.result.files[active];
+      }
+      withWorkspace.result.meta = withWorkspace.result.meta || {};
+      withWorkspace.result.meta.pages_count = Object.keys(withWorkspace.result.files).length;
+    }
+
+    return withWorkspace;
   });
 };
 
@@ -547,6 +581,199 @@ ${currentCode}
       return res.status(e.status).json({ error: e.message, details: e.details });
     }
     return next(e);
+  }
+});
+
+router.post('/edit', requireUser, async (req, res, next) => {
+  try {
+    const { courseId, instruction } = req.body || {};
+    const { user } = req;
+
+    if (typeof courseId !== 'string' || !courseId.trim()) {
+      return res.status(400).json({ error: 'courseId is required' });
+    }
+    if (typeof instruction !== 'string' || !instruction.trim()) {
+      return res.status(400).json({ error: 'instruction is required' });
+    }
+
+    const { progress: current } = await loadCourseProgress(user.id, courseId.trim());
+    const workspace = ensureWorkspace(current);
+    const targetFile = workspace.result.active_file || 'index.html';
+    const currentHtml = workspace.result.files?.[targetFile] ?? '';
+
+    const system = [
+      'Ты — HTML Editor.',
+      'Редактируй существующий HTML документ минимально, строго по инструкции.',
+      'НЕ используй markdown и code fences.',
+      'Верни только полный HTML документ (включая <!DOCTYPE> и <html>), без пояснений.',
+    ].join('\n');
+
+    const prompt = [
+      'ИНСТРУКЦИЯ:',
+      instruction.trim(),
+      '',
+      'CURRENT_HTML_START',
+      currentHtml,
+      'CURRENT_HTML_END',
+      '',
+      'Верни полный обновлённый HTML документ.',
+    ].join('\n');
+
+    const newHtml = await callLlm({
+      system,
+      prompt,
+      temperature: 0.2,
+      maxTokens: 8192,
+    });
+
+    if (!isValidHtmlDocument(newHtml)) {
+      return res.status(502).json({
+        error: 'LLM_INVALID_HTML',
+        details: stripFences(String(newHtml || '')).slice(0, 500),
+      });
+    }
+
+    const next = ensureWorkspace({
+      ...workspace,
+      result: {
+        ...workspace.result,
+        files: {
+          ...workspace.result.files,
+          [targetFile]: String(newHtml),
+        },
+        active_file: targetFile,
+        meta: {
+          ...(workspace.result.meta || {}),
+          edit_count: Number.isFinite(Number(workspace.result.meta?.edit_count))
+            ? Number(workspace.result.meta.edit_count) + 1
+            : 1,
+        },
+      },
+    });
+
+    next.result.meta.pages_count = Object.keys(next.result.files).length;
+    next.result.html = next.result.files[next.result.active_file] ?? next.result.html ?? null;
+
+    const { progress: saved } = await saveCourseProgress(user.id, courseId.trim(), next);
+    return res.json(toWorkspaceResponse(saved));
+  } catch (error) {
+    if (error.message === 'FAILED_TO_FETCH_PROGRESS') {
+      return res.status(500).json({ error: 'FAILED_TO_FETCH_PROGRESS' });
+    }
+    if (error.message === 'FAILED_TO_SAVE_PROGRESS') {
+      return res.status(500).json({ error: 'FAILED_TO_SAVE_PROGRESS' });
+    }
+    return next(error);
+  }
+});
+
+router.post('/add-page', requireUser, async (req, res, next) => {
+  try {
+    const { courseId, instruction } = req.body || {};
+    const { user } = req;
+
+    if (typeof courseId !== 'string' || !courseId.trim()) {
+      return res.status(400).json({ error: 'courseId is required' });
+    }
+    if (typeof instruction !== 'string' || !instruction.trim()) {
+      return res.status(400).json({ error: 'instruction is required' });
+    }
+
+    const { progress: current } = await loadCourseProgress(user.id, courseId.trim());
+    const workspace = ensureWorkspace(current);
+    const files = workspace.result.files || { 'index.html': '' };
+    const newFile = pickNextPageFilename(Object.keys(files));
+    const indexHtml = files['index.html'] || '';
+
+    const fileNames = Object.keys(files).sort();
+    const otherFiles = fileNames.filter((name) => name !== 'index.html');
+
+    const system = [
+      'Ты — генератор многостраничного HTML сайта.',
+      'Верни ТОЛЬКО JSON объект без markdown и без code fences.',
+      'Ключи — имена файлов, значения — полный HTML документ.',
+      'Никаких пояснений, никакого текста вне JSON.',
+    ].join('\n');
+
+    const prompt = [
+      `CRITICAL: Верни строго JSON вида: { "index.html": "<...>", "${newFile}": "<...>" }`,
+      'Требования:',
+      `- Создай новый файл "${newFile}" по инструкции в том же стиле (шрифты/цвета/библиотеки можно копировать из index.html).`,
+      `- Обнови "index.html": добавь рабочую ссылку <a href="${newFile}">...</a> в навбар/меню/CTA (если навбар уже есть — аккуратно дополни).`,
+      '- Не используй бандлеры; только CDN как в исходном HTML.',
+      '- Верни полный HTML в обоих файлах (<!DOCTYPE> + <html>...).',
+      '',
+      'INSTRUCTION:',
+      instruction.trim(),
+      '',
+      'CURRENT_INDEX_HTML_START',
+      indexHtml,
+      'CURRENT_INDEX_HTML_END',
+      '',
+      otherFiles.length ? `OTHER_FILES: ${otherFiles.join(', ')}` : 'OTHER_FILES: (none)',
+    ].join('\n');
+
+    const llmText = await callLlm({
+      system,
+      prompt,
+      temperature: 0.3,
+      maxTokens: 8192,
+    });
+
+    const parsed = extractFirstJsonObject(llmText);
+    if (!parsed || typeof parsed !== 'object') {
+      return res.status(502).json({
+        error: 'LLM_JSON_PARSE_FAILED',
+        details: stripFences(String(llmText || '')).slice(0, 800),
+      });
+    }
+
+    const nextIndex = parsed['index.html'];
+    const nextNew = parsed[newFile];
+    if (typeof nextIndex !== 'string' || typeof nextNew !== 'string') {
+      return res.status(502).json({
+        error: 'LLM_JSON_MISSING_FILES',
+        details: `Expected keys: "index.html", "${newFile}"`,
+      });
+    }
+
+    if (!isValidHtmlDocument(nextIndex) || !isValidHtmlDocument(nextNew)) {
+      return res.status(502).json({
+        error: 'LLM_INVALID_HTML',
+        details: 'index.html or new page html failed validation',
+      });
+    }
+
+    const next = ensureWorkspace({
+      ...workspace,
+      result: {
+        ...workspace.result,
+        files: {
+          ...files,
+          'index.html': nextIndex,
+          [newFile]: nextNew,
+        },
+        active_file: newFile,
+        meta: {
+          ...(workspace.result.meta || {}),
+          last_added_file: newFile,
+        },
+      },
+    });
+
+    next.result.meta.pages_count = Object.keys(next.result.files).length;
+    next.result.html = next.result.files[next.result.active_file] ?? next.result.html ?? null;
+
+    const { progress: saved } = await saveCourseProgress(user.id, courseId.trim(), next);
+    return res.json(toWorkspaceResponse(saved));
+  } catch (error) {
+    if (error.message === 'FAILED_TO_FETCH_PROGRESS') {
+      return res.status(500).json({ error: 'FAILED_TO_FETCH_PROGRESS' });
+    }
+    if (error.message === 'FAILED_TO_SAVE_PROGRESS') {
+      return res.status(500).json({ error: 'FAILED_TO_SAVE_PROGRESS' });
+    }
+    return next(error);
   }
 });
 

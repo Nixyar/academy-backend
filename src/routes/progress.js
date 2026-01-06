@@ -8,6 +8,7 @@ import {
   normalizeProgress,
   saveCourseProgress,
 } from '../lib/courseProgress.js';
+import { ensureWorkspace } from '../lib/htmlWorkspace.js';
 import requireUser from '../middleware/requireUser.js';
 
 const router = Router();
@@ -316,6 +317,61 @@ router.get('/courses/:courseId/resume', requireUser, async (req, res, next) => {
   } catch (error) {
     if (error.message === 'FAILED_TO_FETCH_PROGRESS') {
       return res.status(500).json({ error: 'FAILED_TO_FETCH_PROGRESS' });
+    }
+
+    return next(error);
+  }
+});
+
+router.patch('/v1/progress/active-file', requireUser, async (req, res, next) => {
+  try {
+    const { courseId, file } = req.body || {};
+    const { user } = req;
+
+    if (typeof courseId !== 'string' || !courseId.trim()) {
+      return res.status(400).json({ error: 'courseId is required' });
+    }
+    if (typeof file !== 'string' || !file.trim()) {
+      return res.status(400).json({ error: 'file is required' });
+    }
+
+    const { progress: current } = await loadCourseProgress(user.id, courseId.trim());
+    const workspace = ensureWorkspace(current);
+
+    const files = workspace.result?.files || {};
+    if (!Object.prototype.hasOwnProperty.call(files, file)) {
+      return res.status(400).json({ error: 'FILE_NOT_FOUND', details: `Unknown file "${file}"` });
+    }
+
+    const next = ensureWorkspace({
+      ...workspace,
+      result: {
+        ...workspace.result,
+        active_file: file,
+        html: files[file] ?? workspace.result.html ?? null,
+      },
+    });
+
+    const { progress: saved, updatedAt } = await saveCourseProgress(user.id, courseId.trim(), next);
+    const savedWorkspace = ensureWorkspace(saved);
+
+    return res.json({
+      courseId,
+      course_id: courseId.trim(),
+      result: {
+        files: savedWorkspace.result.files,
+        active_file: savedWorkspace.result.active_file,
+        meta: savedWorkspace.result.meta,
+      },
+      updatedAt,
+    });
+  } catch (error) {
+    if (error.message === 'FAILED_TO_FETCH_PROGRESS') {
+      return res.status(500).json({ error: 'FAILED_TO_FETCH_PROGRESS' });
+    }
+
+    if (error.message === 'FAILED_TO_SAVE_PROGRESS') {
+      return res.status(500).json({ error: 'FAILED_TO_SAVE_PROGRESS' });
     }
 
     return next(error);
