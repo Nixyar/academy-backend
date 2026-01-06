@@ -205,6 +205,78 @@ const inferLinkPlacement = (instruction) => {
   return 'auto';
 };
 
+const inferLinkLabel = (instruction, fallback) => {
+  const s = String(instruction || '').trim();
+  const quoted = s.match(/["“”«»]([^"“”«»]{2,60})["“”«»]/);
+  if (quoted?.[1]) return quoted[1].trim();
+  const m = s.match(/страниц[ауеы]?\s+(?:с|про)\s+([^\n.]{2,60})/i);
+  if (m?.[1]) return m[1].trim().replace(/^./, (c) => c.toUpperCase());
+  return String(fallback || '').trim() || 'Открыть страницу';
+};
+
+const shouldInjectBackLink = (instruction) => /(\bназад\b|вернут|back)/i.test(String(instruction || ''));
+
+const hasTailwindCdn = (html) => /cdn\.tailwindcss\.com/i.test(String(html || ''));
+
+const shrinkTailwindClasses = (className) => {
+  const tokens = String(className || '')
+    .split(/\s+/)
+    .map((t) => t.trim())
+    .filter(Boolean);
+
+  const map = {
+    'px-12': 'px-6',
+    'px-10': 'px-5',
+    'px-8': 'px-4',
+    'px-6': 'px-3',
+    'px-5': 'px-3',
+    'py-6': 'py-3',
+    'py-5': 'py-3',
+    'py-4': 'py-2',
+    'py-3': 'py-2',
+    'text-3xl': 'text-lg',
+    'text-2xl': 'text-base',
+    'text-xl': 'text-sm',
+    'text-lg': 'text-sm',
+    'rounded-3xl': 'rounded-2xl',
+    'rounded-2xl': 'rounded-xl',
+  };
+
+  const out = tokens.map((t) => map[t] ?? t);
+
+  const hasText = out.some((t) => t.startsWith('text-'));
+  const hasPx = out.some((t) => t.startsWith('px-'));
+  const hasPy = out.some((t) => t.startsWith('py-'));
+
+  if (!hasText) out.push('text-sm');
+  if (!hasPx) out.push('px-3');
+  if (!hasPy) out.push('py-2');
+
+  return out.join(' ');
+};
+
+const pickLinkClassTemplate = (html) => {
+  const doc = String(html || '');
+
+  const findInContainer = (tag) => {
+    const mContainer = doc.match(new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}>`, 'i'));
+    if (!mContainer) return null;
+    const mA = mContainer[0].match(/<a\b[^>]*class=["']([^"']+)["'][^>]*>/i);
+    return mA?.[1] ? mA[1].trim() : null;
+  };
+
+  const fromNav = findInContainer('nav');
+  if (fromNav) return { className: fromNav, source: 'nav' };
+
+  const fromHeader = findInContainer('header');
+  if (fromHeader) return { className: fromHeader, source: 'header' };
+
+  const ctaMatch = doc.match(/<(a|button)\b[^>]*class=["']([^"']+)["'][^>]*>([\s\S]{0,120})<\/\1>/i);
+  if (ctaMatch?.[2]) return { className: ctaMatch[2].trim(), source: 'cta' };
+
+  return { className: null, source: 'none' };
+};
+
 const ensureHrefInHtml = (html, href, label, opts = {}) => {
   const doc = String(html || '');
   const safeHref = String(href || '').replace(/"/g, '&quot;');
@@ -213,15 +285,31 @@ const ensureHrefInHtml = (html, href, label, opts = {}) => {
     return doc;
   }
 
-  const linkHtml =
-    `<a href="${safeHref}" style="display:inline-block;margin:8px 0;padding:8px 12px;border-radius:12px;` +
-    `font-size:14px;line-height:1.2;opacity:.92;` +
-    `background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.14);color:#e5e7eb;` +
-    `text-decoration:none;font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,sans-serif">` +
-    `${safeLabel}</a>`;
+  const tailwind = hasTailwindCdn(doc);
+  const template = pickLinkClassTemplate(doc);
+  const placement = typeof opts.placement === 'string' ? opts.placement : 'auto';
+
+  let linkHtml;
+  if (tailwind) {
+    const base =
+      template.className && template.source !== 'cta'
+        ? template.className
+        : template.className && template.source === 'cta'
+          ? shrinkTailwindClasses(template.className)
+          : 'inline-flex items-center gap-2 px-3 py-2 rounded-full bg-white/10 hover:bg-white/15 text-white text-sm';
+    linkHtml = `<a href="${safeHref}" class="${base}">${safeLabel}</a>`;
+  } else if (template.className) {
+    linkHtml = `<a href="${safeHref}" class="${template.className}">${safeLabel}</a>`;
+  } else {
+    linkHtml =
+      `<a href="${safeHref}" style="display:inline-block;margin:8px 0;padding:8px 12px;border-radius:12px;` +
+      `font-size:14px;line-height:1.2;opacity:.92;` +
+      `background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.14);color:#e5e7eb;` +
+      `text-decoration:none;font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,sans-serif">` +
+      `${safeLabel}</a>`;
+  }
 
   // Prefer placing links into <nav> or <header> if present.
-  const placement = typeof opts.placement === 'string' ? opts.placement : 'auto';
   if (placement === 'footer' && /<footer\b[^>]*>[\s\S]*<\/footer>/i.test(doc)) {
     return doc.replace(/<\/footer>/i, `${linkHtml}\n</footer>`);
   }
@@ -236,7 +324,7 @@ const ensureHrefInHtml = (html, href, label, opts = {}) => {
   }
 
   if (/<body[^>]*>/i.test(doc)) {
-    return doc.replace(/<body([^>]*)>/i, (m) => `${m}\n<div style="padding:16px">${linkHtml}</div>`);
+    return doc.replace(/<body([^>]*)>/i, (m) => `${m}\n${linkHtml}`);
   }
   return doc;
 };
@@ -1336,18 +1424,21 @@ ${assembledSections.join('\n\n')}
 	    });
 
     emitStatus(job, 'validating', 'validating llm output', 0.6);
-    const nextNew = stripFences(normalizeLlmHtml(newPageText));
-    if (!isValidHtmlDocument(nextNew)) {
-      throw Object.assign(new Error('LLM_INVALID_HTML'), {
-        status: 502,
-        details: stripFences(String(nextNew || '')).slice(0, 800),
-      });
-    }
+	    const nextNew = stripFences(normalizeLlmHtml(newPageText));
+	    if (!isValidHtmlDocument(nextNew)) {
+	      throw Object.assign(new Error('LLM_INVALID_HTML'), {
+	        status: 502,
+	        details: stripFences(String(nextNew || '')).slice(0, 800),
+	      });
+	    }
 
-    const newTitle = extractHtmlTitle(nextNew);
+	    const newTitle = extractHtmlTitle(nextNew);
 	    const placement = inferLinkPlacement(job.instruction);
-	    const stitchedIndex = ensureHrefInHtml(indexHtml, resolvedNewFile, newTitle || 'Открыть страницу', { placement });
-    const stitchedNew = ensureHrefInHtml(nextNew, 'index.html', 'Назад');
+	    const linkLabel = inferLinkLabel(job.instruction, newTitle || 'Открыть страницу');
+	    const stitchedIndex = ensureHrefInHtml(indexHtml, resolvedNewFile, linkLabel, { placement });
+	    const stitchedNew = shouldInjectBackLink(job.instruction)
+	      ? ensureHrefInHtml(nextNew, 'index.html', 'Назад', { placement: 'header' })
+	      : nextNew;
 
     const tooLarge = ensureHtmlWithinLimit({ 'index.html': stitchedIndex, [resolvedNewFile]: stitchedNew });
     if (tooLarge) {
