@@ -14,7 +14,8 @@ import { ensureWorkspace, pickNextPageFilename } from '../lib/htmlWorkspace.js';
 
 const router = Router();
 
-const jobs = new Map(); // Map<jobId, { status, outline, css, sections, html, debug }>
+const JOB_TTL_MS = 20 * 60 * 1000;
+const jobs = new Map(); // Map<jobId, Job>
 
 const CSS_SYSTEM_SUFFIX = `
 Ты генерируешь ГЛОБАЛЬНЫЙ CSS.
@@ -225,13 +226,13 @@ h1,h2,h3,p { margin: 0 0 12px 0; }
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
 }`;
 
-const ensureFallbackCss = (job, res) => {
+const ensureFallbackCss = (job, emit) => {
   if (job.css) return;
   job.css = fallbackCss;
-  sendSse(res, 'css', { type: 'css', content: job.css, css: job.css });
+  emit('css', { type: 'css', content: job.css, css: job.css });
 };
 
-const ensureFallbackSections = (job, res) => {
+const ensureFallbackSections = (job, emit) => {
   const keys =
     job.sectionOrder?.length
       ? job.sectionOrder
@@ -244,7 +245,7 @@ const ensureFallbackSections = (job, res) => {
     const spec = job.sectionSpecs?.[key] || job.outline?.layout?.[idx] || job.outline?.[key];
     const fallback = buildFallbackSection(key, spec);
     job.sections[key] = fallback;
-    sendSse(res, 'section', { type: 'section', id: key, html: fallback });
+    emit('section', { type: 'section', id: key, html: fallback });
   });
 };
 
@@ -265,6 +266,90 @@ const sendSse = (res, event, payload) => {
     // eslint-disable-next-line no-console
     console.error('Failed to write SSE chunk', err);
   }
+};
+
+const broadcastSse = (job, event, payload) => {
+  if (!job?.subscribers) return;
+  for (const res of job.subscribers) {
+    if (!canWrite(res)) {
+      job.subscribers.delete(res);
+      continue;
+    }
+    sendSse(res, event, payload);
+  }
+};
+
+const emitStatus = (job, status, message, progress) => {
+  const payload = {
+    status,
+    message: typeof message === 'string' ? message : undefined,
+    progress: typeof progress === 'number' ? progress : undefined,
+  };
+  job.lastStatus = payload;
+  broadcastSse(job, 'status', payload);
+};
+
+const safeEnd = (res) => {
+  try {
+    if (canWrite(res)) res.end();
+  } catch {
+    // ignore
+  }
+};
+
+const scheduleJobCleanup = (jobId) => {
+  const job = jobs.get(jobId);
+  if (!job) return;
+
+  if (job.cleanupTimer) clearTimeout(job.cleanupTimer);
+  job.cleanupTimer = setTimeout(() => {
+    const current = jobs.get(jobId);
+    if (!current) return;
+    for (const res of current.subscribers || []) safeEnd(res);
+    jobs.delete(jobId);
+  }, JOB_TTL_MS);
+};
+
+const ensureJob = (jobId, init) => {
+  const existing = jobs.get(jobId);
+  if (existing) return existing;
+
+  const job = {
+    jobId,
+    status: 'queued',
+    mode: init.mode,
+    userId: init.userId,
+    courseId: init.courseId,
+    lessonId: init.lessonId || null,
+    instruction: init.instruction,
+
+    subscribers: new Set(),
+    cleanupTimer: null,
+    createdAt: Date.now(),
+    started: false,
+    runner: null,
+
+    // output/state
+    lastStatus: { status: 'queued', message: 'queued', progress: 0 },
+    result: null,
+    error: null,
+
+    // create-mode specific state (for replay/debug)
+    outline: null,
+    css: null,
+    sections: {},
+    html: null,
+    renderSystem: null,
+    sectionOrder: [],
+    sectionSpecs: {},
+    context: null,
+    prompt: null,
+    debug: [],
+  };
+
+  jobs.set(jobId, job);
+  scheduleJobCleanup(jobId);
+  return job;
 };
 
 const recordDebug = (job, entry) => {
@@ -395,7 +480,7 @@ const heartbeatActiveJob = async (job, extra = {}) => {
 
 const completeActiveJob = async (job, status, result = {}) => {
   const now = new Date().toISOString();
-  await mutateCourseProgress(job.userId, job.courseId, (progress) => {
+  const { progress: saved } = await mutateCourseProgress(job.userId, job.courseId, (progress) => {
     if (!progress.active_job || progress.active_job.jobId !== job.jobId) return null;
 
     const lastUpdatedByLessonId =
@@ -422,6 +507,9 @@ const completeActiveJob = async (job, status, result = {}) => {
         : { html: null, meta: {} };
 
     const meta = result.meta && typeof result.meta === 'object' ? result.meta : {};
+    const files =
+      result.files && typeof result.files === 'object' && !Array.isArray(result.files) ? result.files : undefined;
+    const activeFile = typeof result.active_file === 'string' ? result.active_file : undefined;
 
     const nextProgress = {
       ...progress,
@@ -429,6 +517,8 @@ const completeActiveJob = async (job, status, result = {}) => {
       result: {
         ...baseResult,
         html: result.html ?? baseResult.html ?? null,
+        files: files ?? baseResult.files,
+        active_file: activeFile ?? baseResult.active_file,
         meta: { ...(baseResult.meta || {}), ...meta },
       },
     };
@@ -446,6 +536,8 @@ const completeActiveJob = async (job, status, result = {}) => {
 
     return withWorkspace;
   });
+
+  return saved;
 };
 
 const failActiveJob = async (job, code) =>
@@ -462,153 +554,134 @@ const getLastHeartbeat = (activeJob, progressUpdatedAt) => {
   return Number.isNaN(ts) ? null : ts;
 };
 
-router.post('/start', requireUser, async (req, res, next) => {
-  let jobId;
-  let courseId;
+const normalizeMode = (value) => {
+  const raw = typeof value === 'string' ? value.trim().toLowerCase() : 'create';
+  if (raw === 'add-page') return 'add_page';
+  return raw;
+};
 
-  try {
-    const { prompt, lessonId, mode, target_file, files } = req.body || {};
-    const { user } = req;
+const enqueueJob = async ({ userId, mode, courseId, lessonId, instruction }) => {
+  let resolvedCourseId = courseId;
+  let resolvedLessonId = lessonId || null;
 
-    if (typeof prompt !== 'string' || !prompt.trim()) {
-      return res.status(400).json({ error: 'prompt is required' });
-    }
+  if (mode === 'create') {
+    const { lesson } = await fetchLessonPrompts(lessonId);
+    resolvedCourseId = lesson.course_id;
+    resolvedLessonId = lessonId;
+  }
 
-    if (typeof lessonId !== 'string' || !lessonId.trim()) {
-      return res.status(400).json({ error: 'lessonId is required' });
-    }
+  const { progress: currentProgress, updatedAt: progressUpdatedAt } = await loadCourseProgress(
+    userId,
+    resolvedCourseId,
+  );
+  const activeJob = currentProgress.active_job;
+  const existingJob = activeJob?.jobId ? jobs.get(activeJob.jobId) : null;
+  const lastHeartbeat = getLastHeartbeat(activeJob, progressUpdatedAt);
+  const isStale =
+    isActiveJobRunning(activeJob) &&
+    (!lastHeartbeat || Date.now() - lastHeartbeat > ACTIVE_JOB_TTL_MS || !existingJob);
 
-    // --- REZ: Context Injection ---
-    const fileList = Object.keys(files || {}).join(', ');
-    const currentCode = (files && target_file) ? files[target_file] : null;
-
-    let context = `
-=== CONTEXT ===
-Existing files: ${fileList || 'None'}
-`;
-
-    if (currentCode) {
-      context += `
-CURRENT CODE OF FILE "${target_file}":
-${currentCode}
-`;
-    }
-    context += `=================\n`;
-    // ----------------------------
-
-    const { planSystem, renderSystem, lesson } = await fetchLessonPrompts(lessonId);
-    courseId = lesson.course_id;
-
-    const { progress: currentProgress, updatedAt: progressUpdatedAt } = await loadCourseProgress(
-      user.id,
-      courseId,
-    );
-    const activeJob = currentProgress.active_job;
-    const existingJob = activeJob?.jobId ? jobs.get(activeJob.jobId) : null;
-    const lastHeartbeat = getLastHeartbeat(activeJob, progressUpdatedAt);
-    const isStale =
-      isActiveJobRunning(activeJob) &&
-      (!lastHeartbeat || Date.now() - lastHeartbeat > ACTIVE_JOB_TTL_MS || !existingJob);
-
-    if (isStale && activeJob) {
-      await saveCourseProgress(user.id, courseId, {
-        ...currentProgress,
-        active_job: {
-          ...activeJob,
-          status: 'failed',
-          updatedAt: new Date().toISOString(),
-          error: 'STALE_HEARTBEAT',
-        },
-      });
-    }
-
-    if (isActiveJobRunning(activeJob) && !isStale) {
-      return res.json({
-        already_running: true,
-        jobId: activeJob.jobId,
-        status: activeJob.status || 'running',
-      });
-    }
-
-    jobId = randomUUID();
-    const nowIso = new Date().toISOString();
-    const initialProgress = {
+  if (isStale && activeJob) {
+    await saveCourseProgress(userId, resolvedCourseId, {
       ...currentProgress,
       active_job: {
-        jobId,
-        courseId,
-        lessonId,
-        status: 'queued',
-        prompt: prompt.trim(),
-        startedAt: nowIso,
-        updatedAt: nowIso,
+        ...activeJob,
+        status: 'failed',
+        updatedAt: new Date().toISOString(),
+        error: 'STALE_HEARTBEAT',
       },
-      result: {
-        html: null,
-        meta:
-          currentProgress.result && typeof currentProgress.result.meta === 'object'
-            ? { ...currentProgress.result.meta }
-            : {},
-      },
-    };
-
-    await saveCourseProgress(user.id, courseId, initialProgress);
-
-    const outlineText = await callLlm({
-      system: context + planSystem,
-      prompt: prompt.trim(),
-      temperature: 0.6,
-      maxTokens: 4096,
     });
+  }
 
-    const outline = extractFirstJsonObject(outlineText);
+  if (isActiveJobRunning(activeJob) && !isStale) {
+    return { jobId: activeJob.jobId, already_running: true, courseId: resolvedCourseId };
+  }
 
-    if (!outline || typeof outline !== 'object') {
-      await failActiveJob({ userId: user.id, courseId, jobId }, 'LLM_PLAN_PARSE_FAILED');
-      return res.status(502).json({
-        error: 'LLM_PLAN_PARSE_FAILED',
-        details: stripFences(String(outlineText || '')).slice(0, 800),
+  const jobId = randomUUID();
+  const nowIso = new Date().toISOString();
+  const initialProgress = {
+    ...currentProgress,
+    active_job: {
+      jobId,
+      courseId: resolvedCourseId,
+      lessonId: resolvedLessonId,
+      status: 'queued',
+      prompt: instruction,
+      startedAt: nowIso,
+      updatedAt: nowIso,
+    },
+    result: {
+      html: null,
+      meta:
+        currentProgress.result && typeof currentProgress.result.meta === 'object'
+          ? { ...currentProgress.result.meta }
+          : {},
+    },
+  };
+
+  await saveCourseProgress(userId, resolvedCourseId, initialProgress);
+
+  const job = ensureJob(jobId, {
+    mode,
+    userId,
+    courseId: resolvedCourseId,
+    lessonId: resolvedLessonId,
+    instruction,
+  });
+  job.status = 'queued';
+  emitStatus(job, 'queued', 'queued', 0);
+  await heartbeatActiveJob(job, { status: 'queued' });
+
+  return { jobId, already_running: false, courseId: resolvedCourseId };
+};
+
+router.post('/start', requireUser, async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    const mode = normalizeMode(body.mode);
+    const lessonId = typeof body.lessonId === 'string' ? body.lessonId.trim() : '';
+    const requestedCourseId = typeof body.courseId === 'string' ? body.courseId.trim() : '';
+    const instruction =
+      typeof body.instruction === 'string'
+        ? body.instruction.trim()
+        : (typeof body.prompt === 'string' ? body.prompt.trim() : '');
+    const { user } = req;
+
+    if (!['create', 'edit', 'add_page'].includes(mode)) {
+      return res.status(400).json({
+        error: 'INVALID_MODE',
+        details: 'mode must be create|edit|add_page',
       });
     }
 
-    const sectionEntries = deriveSections(outline);
-    if (!sectionEntries.length) {
-      await completeActiveJob(
-        { userId: user.id, courseId, jobId, lessonId },
-        'failed',
-        { meta: { error: 'LLM_PLAN_NO_SECTIONS', last_llm_error: 'LLM_PLAN_NO_SECTIONS' } },
-      );
-      return res
-        .status(502)
-        .json({ error: 'LLM_PLAN_NO_SECTIONS', details: JSON.stringify(outline).slice(0, 800) });
+    if (!instruction) {
+      return res.status(400).json({ error: 'instruction is required' });
     }
 
-    const jobPayload = {
-      status: 'pending',
-      jobId,
-      outline,
-      css: null,
-      sections: {},
-      html: null,
-      renderSystem,
-      lessonId,
-      courseId,
+    if (mode === 'create') {
+      if (!lessonId) return res.status(400).json({ error: 'lessonId is required' });
+      const { lesson } = await fetchLessonPrompts(lessonId);
+      const derivedCourseId = lesson.course_id;
+      if (requestedCourseId && requestedCourseId !== derivedCourseId) {
+        return res.status(400).json({
+          error: 'COURSE_ID_MISMATCH',
+          details: `lesson.course_id != courseId (${derivedCourseId} != ${requestedCourseId})`,
+        });
+      }
+    } else {
+      if (!requestedCourseId) return res.status(400).json({ error: 'courseId is required' });
+    }
+
+    const { jobId } = await enqueueJob({
       userId: user.id,
-      prompt: prompt.trim(),
-      sectionOrder: sectionEntries.map(({ key }) => key),
-      sectionSpecs: Object.fromEntries(sectionEntries.map(({ key, spec }) => [key, spec])),
-      debug: [],
-      context,
-    };
+      mode,
+      courseId: requestedCourseId || null,
+      lessonId,
+      instruction,
+    });
 
-    jobs.set(jobId, jobPayload);
-    await heartbeatActiveJob(jobPayload, { status: 'running' });
-
-    return res.json({ already_running: false, jobId, status: 'running', outline });
+    return res.json({ jobId });
   } catch (e) {
-    if (jobId && courseId && req?.user?.id) {
-      await failActiveJob({ userId: req.user.id, courseId, jobId }, e?.message || 'FAILED');
-    }
     if (e?.status) {
       return res.status(e.status).json({ error: e.message, details: e.details });
     }
@@ -618,7 +691,7 @@ ${currentCode}
 
 router.post('/edit', requireUser, async (req, res, next) => {
   try {
-    const { courseId, instruction } = req.body || {};
+    const { courseId, instruction, lessonId } = req.body || {};
     const { user } = req;
 
     if (typeof courseId !== 'string' || !courseId.trim()) {
@@ -628,80 +701,15 @@ router.post('/edit', requireUser, async (req, res, next) => {
       return res.status(400).json({ error: 'instruction is required' });
     }
 
-    const { progress: current } = await loadCourseProgress(user.id, courseId.trim());
-    if (!hasIndexHtmlInProgress(current)) {
-      return res.status(400).json({
-        error: 'NO_INDEX_HTML',
-        details: 'index.html is missing; generate the site first',
-      });
-    }
-    const workspace = ensureWorkspace(current);
-    const targetFile = workspace.result.active_file || 'index.html';
-    const currentHtml = workspace.result.files?.[targetFile] ?? '';
-
-    const system = [
-      'Ты — HTML Editor.',
-      'Редактируй существующий HTML документ минимально, строго по инструкции.',
-      'НЕ используй markdown и code fences.',
-      'Верни только полный HTML документ (включая <!DOCTYPE> и <html>), без пояснений.',
-    ].join('\n');
-
-    const prompt = [
-      'ИНСТРУКЦИЯ:',
-      instruction.trim(),
-      '',
-      'CURRENT_HTML_START',
-      currentHtml,
-      'CURRENT_HTML_END',
-      '',
-      'Верни полный обновлённый HTML документ.',
-    ].join('\n');
-
-    const newHtml = await callLlm({
-      system,
-      prompt,
-      temperature: 0.2,
-      maxTokens: 8192,
+    const { jobId } = await enqueueJob({
+      userId: user.id,
+      mode: 'edit',
+      courseId: courseId.trim(),
+      lessonId: typeof lessonId === 'string' ? lessonId.trim() : null,
+      instruction: instruction.trim(),
     });
 
-    if (!isValidHtmlDocument(newHtml)) {
-      return res.status(502).json({
-        error: 'LLM_INVALID_HTML',
-        details: stripFences(String(newHtml || '')).slice(0, 500),
-      });
-    }
-
-    const tooLarge = ensureHtmlWithinLimit({ [targetFile]: newHtml });
-    if (tooLarge) {
-      return res.status(502).json({
-        error: 'LLM_HTML_TOO_LARGE',
-        ...tooLarge,
-      });
-    }
-
-    const next = ensureWorkspace({
-      ...workspace,
-      result: {
-        ...workspace.result,
-        files: {
-          ...workspace.result.files,
-          [targetFile]: String(newHtml),
-        },
-        active_file: targetFile,
-        meta: {
-          ...(workspace.result.meta || {}),
-          edit_count: Number.isFinite(Number(workspace.result.meta?.edit_count))
-            ? Number(workspace.result.meta.edit_count) + 1
-            : 1,
-        },
-      },
-    });
-
-    next.result.meta.pages_count = Object.keys(next.result.files).length;
-    next.result.html = next.result.files[next.result.active_file] ?? next.result.html ?? null;
-
-    const { progress: saved } = await saveCourseProgress(user.id, courseId.trim(), next);
-    return res.json(toWorkspaceResponse(saved));
+    return res.json({ jobId });
   } catch (error) {
     if (error.message === 'FAILED_TO_FETCH_PROGRESS') {
       return res.status(500).json({ error: 'FAILED_TO_FETCH_PROGRESS' });
@@ -715,7 +723,7 @@ router.post('/edit', requireUser, async (req, res, next) => {
 
 router.post('/add-page', requireUser, async (req, res, next) => {
   try {
-    const { courseId, instruction } = req.body || {};
+    const { courseId, instruction, lessonId } = req.body || {};
     const { user } = req;
 
     if (typeof courseId !== 'string' || !courseId.trim()) {
@@ -725,107 +733,15 @@ router.post('/add-page', requireUser, async (req, res, next) => {
       return res.status(400).json({ error: 'instruction is required' });
     }
 
-    const { progress: current } = await loadCourseProgress(user.id, courseId.trim());
-    if (!hasIndexHtmlInProgress(current)) {
-      return res.status(400).json({
-        error: 'NO_INDEX_HTML',
-        details: 'index.html is missing; generate the site first',
-      });
-    }
-    const workspace = ensureWorkspace(current);
-    const files = workspace.result.files || { 'index.html': '' };
-    const newFile = pickNextPageFilename(Object.keys(files));
-    const indexHtml = files['index.html'] || '';
-
-    const fileNames = Object.keys(files).sort();
-    const otherFiles = fileNames.filter((name) => name !== 'index.html');
-
-    const system = [
-      'Ты — генератор многостраничного HTML сайта.',
-      'Верни ТОЛЬКО JSON объект без markdown и без code fences.',
-      'Ключи — имена файлов, значения — полный HTML документ.',
-      'Никаких пояснений, никакого текста вне JSON.',
-    ].join('\n');
-
-    const prompt = [
-      `CRITICAL: Верни строго JSON вида: { "index.html": "<...>", "${newFile}": "<...>" }`,
-      'Требования:',
-      `- Создай новый файл "${newFile}" по инструкции в том же стиле (шрифты/цвета/библиотеки можно копировать из index.html).`,
-      `- Обнови "index.html": добавь рабочую ссылку <a href="${newFile}">...</a> в навбар/меню/CTA (если навбар уже есть — аккуратно дополни).`,
-      '- Не используй бандлеры; только CDN как в исходном HTML.',
-      '- Верни полный HTML в обоих файлах (<!DOCTYPE> + <html>...).',
-      '',
-      'INSTRUCTION:',
-      instruction.trim(),
-      '',
-      'CURRENT_INDEX_HTML_START',
-      indexHtml,
-      'CURRENT_INDEX_HTML_END',
-      '',
-      otherFiles.length ? `OTHER_FILES: ${otherFiles.join(', ')}` : 'OTHER_FILES: (none)',
-    ].join('\n');
-
-    const llmText = await callLlm({
-      system,
-      prompt,
-      temperature: 0.3,
-      maxTokens: 8192,
+    const { jobId } = await enqueueJob({
+      userId: user.id,
+      mode: 'add_page',
+      courseId: courseId.trim(),
+      lessonId: typeof lessonId === 'string' ? lessonId.trim() : null,
+      instruction: instruction.trim(),
     });
 
-    const parsed = extractFirstJsonObject(llmText);
-    if (!parsed || typeof parsed !== 'object') {
-      return res.status(502).json({
-        error: 'LLM_JSON_PARSE_FAILED',
-        details: stripFences(String(llmText || '')).slice(0, 800),
-      });
-    }
-
-    const nextIndex = parsed['index.html'];
-    const nextNew = parsed[newFile];
-    if (typeof nextIndex !== 'string' || typeof nextNew !== 'string') {
-      return res.status(502).json({
-        error: 'LLM_JSON_MISSING_FILES',
-        details: `Expected keys: "index.html", "${newFile}"`,
-      });
-    }
-
-    if (!isValidHtmlDocument(nextIndex) || !isValidHtmlDocument(nextNew)) {
-      return res.status(502).json({
-        error: 'LLM_INVALID_HTML',
-        details: 'index.html or new page html failed validation',
-      });
-    }
-
-    const tooLarge = ensureHtmlWithinLimit({ 'index.html': nextIndex, [newFile]: nextNew });
-    if (tooLarge) {
-      return res.status(502).json({
-        error: 'LLM_HTML_TOO_LARGE',
-        ...tooLarge,
-      });
-    }
-
-    const next = ensureWorkspace({
-      ...workspace,
-      result: {
-        ...workspace.result,
-        files: {
-          ...files,
-          'index.html': nextIndex,
-          [newFile]: nextNew,
-        },
-        active_file: newFile,
-        meta: {
-          ...(workspace.result.meta || {}),
-          last_added_file: newFile,
-        },
-      },
-    });
-
-    next.result.meta.pages_count = Object.keys(next.result.files).length;
-    next.result.html = next.result.files[next.result.active_file] ?? next.result.html ?? null;
-
-    const { progress: saved } = await saveCourseProgress(user.id, courseId.trim(), next);
-    return res.json(toWorkspaceResponse(saved));
+    return res.json({ jobId });
   } catch (error) {
     if (error.message === 'FAILED_TO_FETCH_PROGRESS') {
       return res.status(500).json({ error: 'FAILED_TO_FETCH_PROGRESS' });
@@ -838,177 +754,150 @@ router.post('/add-page', requireUser, async (req, res, next) => {
 });
 
 router.get('/stream', requireUser, async (req, res, next) => {
-  let job;
-  let streamStarted = false;
   let pingInterval;
-  let watcherInterval;
 
-  try {
-    const { jobId, debug } = req.query || {};
-    const debugMode =
-      typeof debug === 'string' && ['1', 'true', 'yes', 'on'].includes(debug.toLowerCase());
-    job = typeof jobId === 'string' ? jobs.get(jobId) : null;
+  const normalizeErrorDetails = (details) => {
+    if (details && typeof details === 'object' && !Array.isArray(details)) return details;
+    if (typeof details !== 'string') return null;
+    const trimmed = details.trim();
+    if (!trimmed) return null;
+    const looksLikeHtml = /<[^>]+>/.test(trimmed);
+    if (looksLikeHtml) return 'INVALID_HTML';
+    return trimmed.slice(0, 800);
+  };
 
-    if (!job || job.userId !== req.user.id) {
-      return res.status(404).json({ error: 'JOB_NOT_FOUND' });
+  const failJob = async (job, err) => {
+    const code = err?.message || 'FAILED';
+    const safeDetails = normalizeErrorDetails(err?.details) || normalizeErrorDetails(err?.message);
+    job.status = 'error';
+    job.error = { error: code, details: safeDetails || undefined };
+    emitStatus(job, 'error', code);
+    broadcastSse(job, 'error', job.error);
+    try {
+      await failActiveJob(job, code);
+    } catch {
+      // ignore
+    }
+  };
+
+  const finishJob = (job) => {
+    scheduleJobCleanup(job.jobId);
+    for (const client of job.subscribers || []) safeEnd(client);
+  };
+
+  const runCreateJob = async (job, debugMode) => {
+    const emit = (event, payload) => broadcastSse(job, event, payload);
+
+    emitStatus(job, 'loading_progress', 'loading progress', 0.05);
+    const { planSystem, renderSystem, lesson } = await fetchLessonPrompts(job.lessonId);
+    if (lesson.course_id !== job.courseId) {
+      throw Object.assign(new Error('COURSE_ID_MISMATCH'), { status: 400, details: 'course mismatch' });
+    }
+    job.renderSystem = renderSystem;
+
+    const { progress: current } = await loadCourseProgress(job.userId, job.courseId);
+    const workspace = ensureWorkspace(current);
+    const fileList = Object.keys(workspace.result.files || {}).join(', ');
+    const activeName = workspace.result.active_file;
+    const currentCode = activeName ? workspace.result.files?.[activeName] : null;
+
+    let context = `
+=== CONTEXT ===
+Existing files: ${fileList || 'None'}
+`;
+    if (currentCode) {
+      context += `
+CURRENT CODE OF FILE "${activeName}":
+${currentCode}
+`;
+    }
+    context += `=================\n`;
+    job.context = context;
+    job.prompt = job.instruction;
+
+    emitStatus(job, 'calling_llm', 'planning', 0.12);
+    const outlineText = await callLlm({
+      system: context + planSystem,
+      prompt: job.instruction,
+      temperature: 0.6,
+      maxTokens: 4096,
+    });
+
+    const outline = extractFirstJsonObject(outlineText);
+    if (!outline || typeof outline !== 'object') {
+      await completeActiveJob(job, 'failed', { meta: { error: 'LLM_PLAN_PARSE_FAILED' } });
+      throw Object.assign(new Error('LLM_PLAN_PARSE_FAILED'), {
+        status: 502,
+        details: stripFences(String(outlineText || '')).slice(0, 800),
+      });
     }
 
-    const persistHeartbeat = async (extra = {}) => {
-      try {
-        await heartbeatActiveJob(job, extra);
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.error('Failed to update job heartbeat', err);
-      }
-    };
+    const sectionEntries = deriveSections(outline);
+    if (!sectionEntries.length) {
+      await completeActiveJob(job, 'failed', {
+        meta: { error: 'LLM_PLAN_NO_SECTIONS', last_llm_error: 'LLM_PLAN_NO_SECTIONS' },
+      });
+      throw Object.assign(new Error('LLM_PLAN_NO_SECTIONS'), {
+        status: 502,
+        details: JSON.stringify(outline).slice(0, 800),
+      });
+    }
 
-    res.set({
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      Connection: 'keep-alive',
-    });
-    res.flushHeaders?.();
-    streamStarted = true;
+    job.outline = outline;
+    job.sectionOrder = sectionEntries.map(({ key }) => key);
+    job.sectionSpecs = Object.fromEntries(sectionEntries.map(({ key, spec }) => [key, spec]));
+    job.sections = job.sections || {};
 
-    let aborted = false;
-    req.on('close', () => {
-      aborted = true;
-      clearInterval(pingInterval);
-      clearInterval(watcherInterval);
-    });
-
-    const failStream = async (err) => {
-      const normalizeDetails = (details) => {
-        if (typeof details !== 'string') return null;
-        const trimmed = details.trim();
-        if (!trimmed) return null;
-        const looksLikeHtml = /<[^>]+>/.test(trimmed);
-        if (looksLikeHtml) return 'INVALID_SECTION_HTML';
-        return trimmed.slice(0, 200);
+    emitStatus(job, 'calling_llm', 'generating css', 0.2);
+    if (!job.css) {
+      const cssCtx = {
+        title: job.outline?.title,
+        lang: job.outline?.lang,
+        theme: job.outline?.theme,
+        constraints: job.outline?.constraints,
       };
 
+      const cssPrompt = [
+        'Сгенерируй полный CSS для страницы.',
+        'Учитывай пользовательский запрос:',
+        job.prompt,
+        'Контекст (JSON):',
+        JSON.stringify(cssCtx),
+      ].join('\n');
+
+      const cssText = await callLlm({
+        system: `${job.renderSystem}\n\n${CSS_SYSTEM_SUFFIX}\n${job.context}`,
+        prompt: cssPrompt,
+        temperature: 0.2,
+        maxTokens: 1800,
+      });
+
+      const cssDebugEntry = recordDebug(job, {
+        step: 'css',
+        prompt: cssPrompt,
+        response: cssText,
+      });
+      if (debugMode && cssDebugEntry) emit('debug', cssDebugEntry);
+
+      job.css = cleanCss(cssText);
+      emit('css', { type: 'css', content: job.css, css: job.css });
+      await heartbeatActiveJob(job);
+    }
+
+    const sectionsToGenerate = job.sectionOrder?.length
+      ? job.sectionOrder.filter((key) => !job.sections[key])
+      : [];
+
+    for (const [idx, key] of sectionsToGenerate.entries()) {
+      emitStatus(
+        job,
+        'calling_llm',
+        `generating section ${idx + 1}/${sectionsToGenerate.length}`,
+        0.25 + (0.55 * (idx / Math.max(1, sectionsToGenerate.length))),
+      );
+
+      let sectionText;
       try {
-        const code = err?.message || 'STREAM_FAILED';
-        const safeDetails = normalizeDetails(err?.details) || normalizeDetails(err?.message);
-        job.status = 'error';
-        sendSse(res, 'error', { type: 'error', code, details: safeDetails || code });
-        await failActiveJob(job, code);
-      } catch {
-        // ignore
-      } finally {
-        clearInterval(pingInterval);
-        clearInterval(watcherInterval);
-        if (canWrite(res)) res.end();
-      }
-    };
-
-    let replayed = false;
-    if (job.css) {
-      sendSse(res, 'css', { type: 'css', content: job.css, css: job.css });
-      await persistHeartbeat();
-    }
-    if (job.sectionOrder?.length) {
-      for (const key of job.sectionOrder) {
-        if (job.sections[key]) {
-          sendSse(res, 'section', { type: 'section', id: key, html: job.sections[key] });
-          await persistHeartbeat();
-          replayed = true;
-        }
-      }
-    }
-
-    if (debugMode && job.debug?.length) {
-      job.debug.forEach((entry) => sendSse(res, 'debug', entry));
-    }
-
-    await persistHeartbeat();
-
-    if (job.status === 'done') {
-      sendSse(res, 'done', { type: 'done' });
-      return res.end();
-    }
-
-    if (job.status === 'running') {
-      pingInterval = setInterval(() => {
-        if (canWrite(res)) {
-          res.write(': ping\n\n');
-        } else {
-          clearInterval(pingInterval);
-        }
-      }, 20000);
-
-      watcherInterval = setInterval(() => {
-        if (!canWrite(res)) {
-          clearInterval(watcherInterval);
-          return;
-        }
-        if (job.status === 'done') {
-          sendSse(res, 'done', { type: 'done' });
-          res.end();
-          clearInterval(watcherInterval);
-          clearInterval(pingInterval);
-        } else if (job.status === 'error') {
-          sendSse(res, 'error', { type: 'error', code: 'STREAM_FAILED', details: 'STREAM_FAILED' });
-          res.end();
-          clearInterval(watcherInterval);
-          clearInterval(pingInterval);
-        }
-      }, 1000);
-
-      return;
-    }
-
-    job.status = 'running';
-    await persistHeartbeat({ status: 'running' });
-    pingInterval = setInterval(() => {
-      if (canWrite(res)) {
-        res.write(': ping\n\n');
-      } else {
-        clearInterval(pingInterval);
-      }
-    }, 20000);
-
-    try {
-      if (!job.css) {
-        const cssCtx = {
-          title: job.outline?.title,
-          lang: job.outline?.lang,
-          theme: job.outline?.theme,
-          constraints: job.outline?.constraints,
-        };
-
-        const cssPrompt = [
-          'Сгенерируй полный CSS для страницы.',
-          'Учитывай пользовательский запрос:',
-          job.prompt,
-          'Контекст (JSON):',
-          JSON.stringify(cssCtx),
-        ].join('\n');
-
-        const cssText = await callLlm({
-          system: `${job.renderSystem}\n\n${CSS_SYSTEM_SUFFIX}\n${job.context}`,
-          prompt: cssPrompt,
-          temperature: 0.2,
-          maxTokens: 1800,
-        });
-
-        const cssDebugEntry = recordDebug(job, {
-          step: 'css',
-          prompt: cssPrompt,
-          response: cssText,
-        });
-        if (debugMode && cssDebugEntry) sendSse(res, 'debug', cssDebugEntry);
-
-        job.css = cleanCss(cssText);
-        sendSse(res, 'css', { type: 'css', content: job.css, css: job.css });
-        await persistHeartbeat();
-      }
-
-      const sectionsToGenerate = job.sectionOrder?.length
-        ? job.sectionOrder.filter((key) => !job.sections[key])
-        : [];
-
-      for (const key of sectionsToGenerate) {
         const sectionSpec = job.sectionSpecs?.[key] ?? job.outline?.[key];
         const sectionCtx = {
           title: job.outline?.title,
@@ -1032,7 +921,7 @@ Return ONLY:
 <section id="${key}">...</section>
 `;
 
-        const sectionText = await callLlm({
+        sectionText = await callLlm({
           system: `${job.renderSystem}\n\n${SECTION_SYSTEM_SUFFIX.replace('{ID}', key)}\n${job.context}`,
           prompt: sectionPrompt,
           temperature: 0.15,
@@ -1045,24 +934,27 @@ Return ONLY:
           prompt: sectionPrompt,
           response: sectionText,
         });
-        if (debugMode && sectionDebug) sendSse(res, 'debug', sectionDebug);
-
-        const sectionHtml = cleanHtmlFragment(normalizeLlmHtml(sectionText));
-        const finalSection =
-          typeof sectionHtml === 'string' && sectionHtml.trim()
-            ? sectionHtml
-            : buildFallbackSection(key, sectionSpec);
-
-        job.sections[key] = finalSection;
-        sendSse(res, 'section', { type: 'section', id: key, html: finalSection });
-        await persistHeartbeat();
+        if (debugMode && sectionDebug) emit('debug', sectionDebug);
+      } catch {
+        sectionText = '';
       }
-    } catch (err) {
-      // Если LLM сломался — отправляем фолбэки и всё равно завершаем
-      ensureFallbackCss(job, res);
-      ensureFallbackSections(job, res);
+
+      const sectionSpec = job.sectionSpecs?.[key] ?? job.outline?.[key];
+      const sectionHtml = cleanHtmlFragment(normalizeLlmHtml(sectionText));
+      const finalSection =
+        typeof sectionHtml === 'string' && sectionHtml.trim()
+          ? sectionHtml
+          : buildFallbackSection(key, sectionSpec);
+
+      job.sections[key] = finalSection;
+      emit('section', { type: 'section', id: key, html: finalSection });
+      await heartbeatActiveJob(job);
     }
 
+    if (!job.css) ensureFallbackCss(job, emit);
+    if (!job.sections || !Object.keys(job.sections).length) ensureFallbackSections(job, emit);
+
+    emitStatus(job, 'validating', 'assembling html', 0.9);
     const assembledSections = (job.sectionOrder || Object.keys(job.sections)).map((key) =>
       job.sections[key] ? job.sections[key] : '',
     );
@@ -1112,64 +1004,292 @@ ${assembledSections.join('\n\n')}
 </html>`;
 
     job.html = finalHtml;
-    job.status = 'done';
 
-    await completeActiveJob(job, 'done', { html: finalHtml });
-    sendSse(res, 'done', { type: 'done' });
-    clearInterval(pingInterval);
-    clearInterval(watcherInterval);
-    if (canWrite(res)) res.end();
+    emitStatus(job, 'saving', 'saving progress', 0.96);
+    const saved = await completeActiveJob(job, 'done', { html: finalHtml });
+    job.result = toWorkspaceResponse(saved);
+    job.status = 'done';
+    emitStatus(job, 'done', 'done', 1);
+    emit('done', { type: 'done', ...job.result });
+  };
+
+  const runEditJob = async (job) => {
+    emitStatus(job, 'loading_progress', 'loading progress', 0.05);
+    const { progress: current } = await loadCourseProgress(job.userId, job.courseId);
+    if (!hasIndexHtmlInProgress(current)) {
+      throw Object.assign(new Error('NO_INDEX_HTML'), {
+        status: 400,
+        details: 'index.html is missing; generate the site first',
+      });
+    }
+
+    emitStatus(job, 'ensure_workspace', 'ensure workspace', 0.15);
+    const workspace = ensureWorkspace(current);
+    const targetFile = workspace.result.active_file || 'index.html';
+    const currentHtml = workspace.result.files?.[targetFile] ?? '';
+
+    emitStatus(job, 'calling_llm', 'editing html', 0.35);
+    const system = [
+      'Ты — HTML Editor.',
+      'Редактируй существующий HTML документ минимально, строго по инструкции.',
+      'НЕ используй markdown и code fences.',
+      'Верни только полный HTML документ (включая <!DOCTYPE> и <html>), без пояснений.',
+    ].join('\n');
+
+    const prompt = [
+      'ИНСТРУКЦИЯ:',
+      job.instruction,
+      '',
+      'CURRENT_HTML_START',
+      currentHtml,
+      'CURRENT_HTML_END',
+      '',
+      'Верни полный обновлённый HTML документ.',
+    ].join('\n');
+
+    const newHtml = await callLlm({
+      system,
+      prompt,
+      temperature: 0.2,
+      maxTokens: 8192,
+    });
+
+    emitStatus(job, 'validating', 'validating html', 0.6);
+    if (!isValidHtmlDocument(newHtml)) {
+      throw Object.assign(new Error('LLM_INVALID_HTML'), {
+        status: 502,
+        details: stripFences(String(newHtml || '')).slice(0, 500),
+      });
+    }
+
+    const tooLarge = ensureHtmlWithinLimit({ [targetFile]: newHtml });
+    if (tooLarge) {
+      throw Object.assign(new Error('LLM_HTML_TOO_LARGE'), { status: 502, details: tooLarge });
+    }
+
+    emitStatus(job, 'saving', 'saving progress', 0.85);
+    const next = ensureWorkspace({
+      ...workspace,
+      result: {
+        ...workspace.result,
+        files: {
+          ...workspace.result.files,
+          [targetFile]: String(newHtml),
+        },
+        active_file: targetFile,
+        meta: {
+          ...(workspace.result.meta || {}),
+          edit_count: Number.isFinite(Number(workspace.result.meta?.edit_count))
+            ? Number(workspace.result.meta.edit_count) + 1
+            : 1,
+        },
+      },
+    });
+    next.result.html = next.result.files[next.result.active_file] ?? next.result.html ?? null;
+
+    const saved = await completeActiveJob(job, 'done', {
+      files: next.result.files,
+      active_file: next.result.active_file,
+      html: next.result.html,
+      meta: next.result.meta,
+    });
+
+    job.result = toWorkspaceResponse(saved);
+    job.status = 'done';
+    emitStatus(job, 'done', 'done', 1);
+    broadcastSse(job, 'done', { type: 'done', ...job.result });
+  };
+
+  const runAddPageJob = async (job) => {
+    emitStatus(job, 'loading_progress', 'loading progress', 0.05);
+    const { progress: current } = await loadCourseProgress(job.userId, job.courseId);
+    if (!hasIndexHtmlInProgress(current)) {
+      throw Object.assign(new Error('NO_INDEX_HTML'), {
+        status: 400,
+        details: 'index.html is missing; generate the site first',
+      });
+    }
+
+    emitStatus(job, 'ensure_workspace', 'ensure workspace', 0.15);
+    const workspace = ensureWorkspace(current);
+    const files = workspace.result.files || { 'index.html': '' };
+    const newFile = pickNextPageFilename(Object.keys(files));
+    const indexHtml = files['index.html'] || '';
+
+    const fileNames = Object.keys(files).sort();
+    const otherFiles = fileNames.filter((name) => name !== 'index.html');
+
+    emitStatus(job, 'calling_llm', 'adding page', 0.35);
+    const system = [
+      'Ты — генератор многостраничного HTML сайта.',
+      'Верни ТОЛЬКО JSON объект без markdown и без code fences.',
+      'Ключи — имена файлов, значения — полный HTML документ.',
+      'Никаких пояснений, никакого текста вне JSON.',
+    ].join('\n');
+
+    const prompt = [
+      `CRITICAL: Верни строго JSON вида: { "index.html": "<...>", "${newFile}": "<...>" }`,
+      'Требования:',
+      `- Создай новый файл "${newFile}" по инструкции в том же стиле (шрифты/цвета/библиотеки можно копировать из index.html).`,
+      `- Обнови "index.html": добавь рабочую ссылку <a href="${newFile}">...</a> в навбар/меню/CTA (если навбар уже есть — аккуратно дополни).`,
+      '- Не используй бандлеры; только CDN как в исходном HTML.',
+      '- Верни полный HTML в обоих файлах (<!DOCTYPE> + <html>...).',
+      '',
+      'INSTRUCTION:',
+      job.instruction,
+      '',
+      'CURRENT_INDEX_HTML_START',
+      indexHtml,
+      'CURRENT_INDEX_HTML_END',
+      '',
+      otherFiles.length ? `OTHER_FILES: ${otherFiles.join(', ')}` : 'OTHER_FILES: (none)',
+    ].join('\n');
+
+    const llmText = await callLlm({
+      system,
+      prompt,
+      temperature: 0.3,
+      maxTokens: 8192,
+    });
+
+    emitStatus(job, 'validating', 'validating llm output', 0.6);
+    const parsed = extractFirstJsonObject(llmText);
+    if (!parsed || typeof parsed !== 'object') {
+      throw Object.assign(new Error('LLM_JSON_PARSE_FAILED'), {
+        status: 502,
+        details: stripFences(String(llmText || '')).slice(0, 800),
+      });
+    }
+
+    const nextIndex = parsed['index.html'];
+    const nextNew = parsed[newFile];
+    if (typeof nextIndex !== 'string' || typeof nextNew !== 'string') {
+      throw Object.assign(new Error('LLM_JSON_MISSING_FILES'), {
+        status: 502,
+        details: `Expected keys: "index.html", "${newFile}"`,
+      });
+    }
+
+    if (!isValidHtmlDocument(nextIndex) || !isValidHtmlDocument(nextNew)) {
+      throw Object.assign(new Error('LLM_INVALID_HTML'), {
+        status: 502,
+        details: 'index.html or new page html failed validation',
+      });
+    }
+
+    const tooLarge = ensureHtmlWithinLimit({ 'index.html': nextIndex, [newFile]: nextNew });
+    if (tooLarge) {
+      throw Object.assign(new Error('LLM_HTML_TOO_LARGE'), { status: 502, details: tooLarge });
+    }
+
+    emitStatus(job, 'saving', 'saving progress', 0.85);
+    const next = ensureWorkspace({
+      ...workspace,
+      result: {
+        ...workspace.result,
+        files: {
+          ...files,
+          'index.html': nextIndex,
+          [newFile]: nextNew,
+        },
+        active_file: newFile,
+        meta: {
+          ...(workspace.result.meta || {}),
+          last_added_file: newFile,
+        },
+      },
+    });
+    next.result.html = next.result.files[next.result.active_file] ?? next.result.html ?? null;
+
+    const saved = await completeActiveJob(job, 'done', {
+      files: next.result.files,
+      active_file: next.result.active_file,
+      html: next.result.html,
+      meta: next.result.meta,
+    });
+
+    job.result = toWorkspaceResponse(saved);
+    job.status = 'done';
+    emitStatus(job, 'done', 'done', 1);
+    broadcastSse(job, 'done', { type: 'done', ...job.result });
+  };
+
+  try {
+    const { jobId, debug } = req.query || {};
+    const debugMode =
+      typeof debug === 'string' && ['1', 'true', 'yes', 'on'].includes(debug.toLowerCase());
+
+    const job = typeof jobId === 'string' ? jobs.get(jobId) : null;
+    if (!job || job.userId !== req.user.id) {
+      return res.status(404).json({ error: 'JOB_NOT_FOUND' });
+    }
+
+    res.set({
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+    });
+    res.flushHeaders?.();
+
+    job.subscribers.add(res);
+    scheduleJobCleanup(job.jobId);
+
+    req.on('close', () => {
+      job.subscribers.delete(res);
+      clearInterval(pingInterval);
+    });
+
+    if (job.lastStatus) sendSse(res, 'status', job.lastStatus);
+    if (job.mode === 'create') {
+      if (job.css) sendSse(res, 'css', { type: 'css', content: job.css, css: job.css });
+      if (job.sectionOrder?.length) {
+        for (const key of job.sectionOrder) {
+          if (job.sections?.[key]) sendSse(res, 'section', { type: 'section', id: key, html: job.sections[key] });
+        }
+      }
+      if (debugMode && job.debug?.length) {
+        job.debug.forEach((entry) => sendSse(res, 'debug', entry));
+      }
+    }
+
+    if (job.status === 'done') {
+      sendSse(res, 'done', { type: 'done', ...(job.result || {}) });
+      return safeEnd(res);
+    }
+    if (job.status === 'error') {
+      sendSse(res, 'error', job.error || { error: 'FAILED' });
+      return safeEnd(res);
+    }
+
+    pingInterval = setInterval(() => {
+      if (!canWrite(res)) return;
+      res.write(': ping\n\n');
+      if (job.lastStatus) sendSse(res, 'status', job.lastStatus);
+    }, 15000);
+
+    if (!job.started) {
+      job.started = true;
+      job.status = 'running';
+      emitStatus(job, 'status', 'running', 0.01);
+      await heartbeatActiveJob(job, { status: 'running' });
+
+      job.runner = (async () => {
+        try {
+          if (job.mode === 'create') await runCreateJob(job, debugMode);
+          else if (job.mode === 'edit') await runEditJob(job);
+          else if (job.mode === 'add_page') await runAddPageJob(job);
+          else throw new Error('INVALID_MODE');
+        } catch (err) {
+          await failJob(job, err);
+        } finally {
+          finishJob(job);
+        }
+      })();
+    }
+
     return;
   } catch (e) {
-    // eslint-disable-next-line no-console
-    console.error('HTML stream failed', e);
-    if (job && !job.sections) job.sections = {};
-    if (job) {
-      job.status = 'error';
-      await failActiveJob(job, e?.message || 'STREAM_FAILED');
-    }
-
-    // Попытаться отправить фолбэк-поток даже если ошибка случилась до начала SSE
-    try {
-      if (!streamStarted) {
-        res.set({
-          'Content-Type': 'text/event-stream',
-          'Cache-Control': 'no-cache',
-          Connection: 'keep-alive',
-        });
-        res.flushHeaders?.();
-        streamStarted = true;
-      }
-
-      if (job) {
-        ensureFallbackCss(job, res);
-        ensureFallbackSections(job, res);
-        const code = e?.message || 'STREAM_FAILED';
-        sendSse(res, 'error', { type: 'error', code, details: e?.details || code });
-        sendSse(res, 'done', { type: 'done' });
-        if (canWrite(res)) res.end();
-        return;
-      }
-    } catch (fallbackErr) {
-      // eslint-disable-next-line no-console
-      console.error('HTML stream fallback failed', fallbackErr);
-    }
-
-    if (streamStarted) {
-      const looksLikeHtml = typeof e?.details === 'string' && /<[^>]+>/.test(e.details);
-      const code = e?.message || 'STREAM_FAILED';
-      const safeDetails =
-        looksLikeHtml || typeof e?.details !== 'string'
-          ? code
-          : e.details.trim().slice(0, 200) || code;
-      sendSse(res, 'error', { type: 'error', code, details: safeDetails });
-      if (canWrite(res)) res.end();
-      return;
-    }
-
-    return res
-      .status(e?.status || 500)
-      .json({ error: 'STREAM_FAILED', details: e?.details || e?.message || null });
+    return next(e);
   }
 });
 
