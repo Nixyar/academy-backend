@@ -141,6 +141,11 @@ const normalizeLlmHtml = (raw) => {
   return s;
 };
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const LLM_TIMEOUT_MS = 60_000;
+const LLM_RETRYABLE_STATUSES = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
+
 const isValidHtmlDocument = (html) => {
   const s = String(html || '');
   if (s.includes('```')) return false;
@@ -206,10 +211,31 @@ const ensureHrefInHtml = (html, href, label) => {
     `text-decoration:none;font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,sans-serif">` +
     `${safeLabel}</a>`;
 
+  // Prefer placing links into <nav> or <header> if present.
+  if (/<nav\b[^>]*>[\s\S]*<\/nav>/i.test(doc)) {
+    return doc.replace(/<\/nav>/i, `${linkHtml}\n</nav>`);
+  }
+  if (/<header\b[^>]*>[\s\S]*<\/header>/i.test(doc)) {
+    return doc.replace(/<\/header>/i, `${linkHtml}\n</header>`);
+  }
+
   if (/<body[^>]*>/i.test(doc)) {
     return doc.replace(/<body([^>]*)>/i, (m) => `${m}\n<div style="padding:16px">${linkHtml}</div>`);
   }
   return doc;
+};
+
+const extractHtmlHead = (html) => {
+  const doc = String(html || '');
+  const match = doc.match(/<head\b[^>]*>[\s\S]*?<\/head>/i);
+  return match ? match[0] : '';
+};
+
+const extractHtmlTitle = (html) => {
+  const doc = String(html || '');
+  const match = doc.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i);
+  const title = match ? match[1] : '';
+  return String(title || '').replace(/<[^>]*>/g, '').trim() || null;
 };
 
 const ensureHtmlWithinLimit = (filesByName) => {
@@ -497,29 +523,64 @@ const fetchLessonPrompts = async (lessonId) => {
 };
 
 const callLlm = async ({ system, prompt, temperature, maxTokens }) => {
-  const resp = await fetch(env.llmApiUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      system,
-      prompt,
-      temperature,
-      maxTokens,
-    }),
-  });
+  let lastError;
 
-  if (!resp.ok) {
-    const errorText = await resp.text().catch(() => null);
-    const err = new Error('LLM_REQUEST_FAILED');
-    err.details = errorText || resp.statusText;
-    err.status = 502;
-    throw err;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const resp = await fetch(env.llmApiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          system,
+          prompt,
+          temperature,
+          maxTokens,
+        }),
+        signal: AbortSignal.timeout(LLM_TIMEOUT_MS),
+      });
+
+      if (!resp.ok) {
+        const contentType = resp.headers.get('content-type') || '';
+        const errorText = await resp.text().catch(() => '');
+        const details = {
+          status: resp.status,
+          statusText: resp.statusText,
+          contentType,
+          body: String(errorText || '').slice(0, 2000),
+        };
+
+        const err = new Error('LLM_REQUEST_FAILED');
+        err.details = details;
+        err.status = 502;
+
+        if (LLM_RETRYABLE_STATUSES.has(resp.status) && attempt < 3) {
+          await sleep(300 * attempt + Math.floor(Math.random() * 200));
+          continue;
+        }
+
+        throw err;
+      }
+
+      const payload = await resp.json().catch(async () => ({ text: await resp.text() }));
+      if (typeof payload?.text === 'string') return payload.text;
+      if (typeof payload?.html === 'string') return payload.html;
+      return String(payload || '');
+    } catch (e) {
+      lastError = e;
+      const isAbort =
+        typeof e === 'object' && e && ('name' in e ? e.name === 'AbortError' : false);
+      if (!isAbort || attempt >= 3) break;
+      await sleep(300 * attempt + Math.floor(Math.random() * 200));
+    }
   }
 
-  const payload = await resp.json().catch(async () => ({ text: await resp.text() }));
-  if (typeof payload?.text === 'string') return payload.text;
-  if (typeof payload?.html === 'string') return payload.html;
-  return String(payload || '');
+  const err = new Error('LLM_REQUEST_FAILED');
+  err.details =
+    lastError && typeof lastError === 'object' && 'message' in lastError
+      ? String(lastError.message)
+      : String(lastError || 'Unknown LLM error');
+  err.status = 502;
+  throw err;
 };
 
 const heartbeatActiveJob = async (job, extra = {}) => {
@@ -601,6 +662,10 @@ const completeActiveJob = async (job, status, result = {}) => {
 
 const failActiveJob = async (job, code, details) => {
   const now = new Date().toISOString();
+  const detailsValue =
+    details && typeof details === 'object'
+      ? JSON.stringify(details).slice(0, 4000)
+      : (typeof details === 'string' ? details : undefined);
   await mutateCourseProgress(job.userId, job.courseId, (progress) => {
     if (!progress.active_job || progress.active_job.jobId !== job.jobId) return null;
     return {
@@ -610,7 +675,7 @@ const failActiveJob = async (job, code, details) => {
         status: 'failed',
         updatedAt: now,
         error: code || 'FAILED',
-        error_details: typeof details === 'string' ? details : undefined,
+        error_details: detailsValue,
       },
     };
   });
@@ -840,8 +905,13 @@ router.get('/stream', requireUser, async (req, res, next) => {
     const trimmed = details.trim();
     if (!trimmed) return null;
     const looksLikeHtml = /<[^>]+>/.test(trimmed);
-    if (looksLikeHtml) return 'INVALID_HTML';
-    return trimmed.slice(0, 800);
+    if (!looksLikeHtml) return trimmed.slice(0, 800);
+    const stripped = trimmed.replace(/<script[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return (stripped || 'UPSTREAM_RETURNED_HTML').slice(0, 800);
   };
 
   const failJob = async (job, err) => {
@@ -1193,105 +1263,70 @@ ${assembledSections.join('\n\n')}
     const otherFiles = fileNames.filter((name) => name !== 'index.html');
 
     emitStatus(job, 'calling_llm', 'adding page', 0.35);
-    let system = [
-      'Ты — генератор многостраничного HTML сайта.',
-      'Верни ТОЛЬКО JSON объект без markdown и без code fences.',
-      'Ключи — имена файлов, значения — полный HTML документ.',
-      'Никаких пояснений, никакого текста вне JSON.',
+    const genericSystem = [
+      'Ты — генератор HTML страницы для многостраничного сайта.',
+      'Верни ТОЛЬКО полный HTML документ (<!DOCTYPE> + <html>...), без markdown и без code fences.',
+      'Никаких пояснений и текста вне HTML.',
+      'Старайся сохранить стиль и компоненты исходного сайта.',
     ].join('\n');
+
+    let system = genericSystem;
 
     if (job.lessonId) {
       try {
         const { renderSystem } = await fetchLessonPrompts(job.lessonId);
-        system = `${renderSystem}\n\n${system}`;
+        system = `${renderSystem}\n\n${genericSystem}`;
       } catch {
         // fall back to generic system prompt
       }
     }
 
-    const suggested = pickUniqueFilename(
+    const resolvedNewFile = pickUniqueFilename(
       toSafeHtmlFilename(job.instruction, 'page'),
       Object.keys(files),
     );
 
+    // Send only the <head> section to keep the prompt smaller but preserve style/CDN usage.
+    const indexHead = extractHtmlHead(indexHtml);
+    const headSnippet = indexHead ? indexHead.slice(0, 20000) : '';
+
     const prompt = [
-      'CRITICAL:',
-      '- Верни строго JSON объект.',
-      '- В JSON должны быть минимум 2 ключа: "index.html" и ОДИН новый *.html файл (можно назвать по смыслу).',
-      `- Рекомендуемое имя нового файла: "${suggested}" (если выберешь другое — оно должно быть безопасным и заканчиваться на .html).`,
-      'Требования:',
-      '- Создай новую страницу по инструкции в том же стиле (шрифты/цвета/библиотеки можно копировать из index.html).',
-      '- Обнови "index.html": добавь рабочую ссылку <a href="NEW_PAGE.html">...</a> в навбар/меню/CTA (если навбар уже есть — аккуратно дополни).',
-      '- На новой странице добавь ссылку назад на index.html (и/или общий навбар).',
-      '- Не ломай существующую структуру: в index.html делай минимальные изменения, только чтобы добавить новую ссылку.',
-      '- Не используй бандлеры; только CDN как в исходном HTML.',
-      '- Верни полный HTML в обоих файлах (<!DOCTYPE> + <html>...).',
+      'Задача: добавь новую страницу к существующему сайту.',
+      `Имя нового файла (informational): ${resolvedNewFile}`,
       '',
       'INSTRUCTION:',
       job.instruction,
       '',
-      'CURRENT_INDEX_HTML_START',
-      indexHtml,
-      'CURRENT_INDEX_HTML_END',
-      '',
       otherFiles.length ? `OTHER_FILES: ${otherFiles.join(', ')}` : 'OTHER_FILES: (none)',
+      '',
+      headSnippet ? 'CURRENT_INDEX_HEAD_START' : 'CURRENT_INDEX_HEAD_MISSING',
+      headSnippet || '',
+      headSnippet ? 'CURRENT_INDEX_HEAD_END' : '',
+      '',
+      'Требования:',
+      '- Верни полный HTML документ.',
+      '- Используй те же библиотеки/CDN, что в index (ориентируйся на <head>).',
+      '- Добавь на странице ссылку назад на index.html (можно в nav или сверху).',
     ].join('\n');
 
-    const callForJson = async (attempt, previousOutput) => {
-      const extra =
-        attempt > 1 && typeof previousOutput === 'string'
-          ? `\n\nТЫ ВЕРНУЛ НЕ JSON. Исправь формат.\nВот твой прошлый ответ (обрезан):\n${stripFences(previousOutput).slice(0, 1200)}`
-          : '';
-      return callLlm({
-        system,
-        prompt: `${prompt}${extra}`,
-        temperature: 0.2,
-        maxTokens: 8192,
-      });
-    };
-
-    let llmText = await callForJson(1);
+    const newPageText = await callLlm({
+      system,
+      prompt,
+      temperature: 0.2,
+      maxTokens: 4096,
+    });
 
     emitStatus(job, 'validating', 'validating llm output', 0.6);
-    let parsed = extractFirstJsonObject(llmText);
-    if (!parsed || typeof parsed !== 'object') {
-      llmText = await callForJson(2, llmText);
-      parsed = extractFirstJsonObject(llmText);
-    }
-    if (!parsed || typeof parsed !== 'object') {
-      throw Object.assign(new Error('LLM_JSON_PARSE_FAILED'), {
-        status: 502,
-        details: stripFences(String(llmText || '')).slice(0, 800),
-      });
-    }
-
-    const nextIndexRaw = parsed['index.html'];
-    const candidateNewNames = Object.keys(parsed).filter((k) => k !== 'index.html');
-    const newNameFromLlm = candidateNewNames.find((k) => isSafeHtmlFilename(k)) || null;
-    const resolvedNewFile =
-      newNameFromLlm && !Object.prototype.hasOwnProperty.call(files, newNameFromLlm)
-        ? newNameFromLlm
-        : suggested;
-    const nextNewRaw = parsed[resolvedNewFile] ?? (newNameFromLlm ? parsed[newNameFromLlm] : undefined);
-
-    if (typeof nextIndexRaw !== 'string' || typeof nextNewRaw !== 'string') {
-      throw Object.assign(new Error('LLM_JSON_MISSING_FILES'), {
-        status: 502,
-        details: `Expected keys: "index.html" and a new ".html" file (suggested: "${suggested}")`,
-      });
-    }
-
-    const nextIndex = stripFences(normalizeLlmHtml(nextIndexRaw));
-    const nextNew = stripFences(normalizeLlmHtml(nextNewRaw));
-
-    if (!isValidHtmlDocument(nextIndex) || !isValidHtmlDocument(nextNew)) {
+    const nextNew = stripFences(normalizeLlmHtml(newPageText));
+    if (!isValidHtmlDocument(nextNew)) {
       throw Object.assign(new Error('LLM_INVALID_HTML'), {
         status: 502,
-        details: 'index.html or new page html failed validation',
+        details: stripFences(String(nextNew || '')).slice(0, 800),
       });
     }
 
-    const stitchedIndex = ensureHrefInHtml(nextIndex, resolvedNewFile, 'Открыть страницу');
+    const newTitle = extractHtmlTitle(nextNew);
+    const stitchedIndex = ensureHrefInHtml(indexHtml, resolvedNewFile, newTitle || 'Открыть страницу');
     const stitchedNew = ensureHrefInHtml(nextNew, 'index.html', 'Назад');
 
     const tooLarge = ensureHtmlWithinLimit({ 'index.html': stitchedIndex, [resolvedNewFile]: stitchedNew });
