@@ -216,6 +216,16 @@ const inferLinkLabel = (instruction, fallback) => {
 
 const shouldInjectBackLink = (instruction) => /(\bназад\b|вернут|back)/i.test(String(instruction || ''));
 
+const inferPrimaryClickText = (instruction) => {
+  const s = String(instruction || '').trim();
+  const quoted = s.match(/["“”«»]([^"“”«»]{2,60})["“”«»]/);
+  if (quoted?.[1]) return quoted[1].trim();
+  if (/погруз/i.test(s)) return 'Погрузиться';
+  return null;
+};
+
+const wantsButtonNavigation = (instruction) => /(когда\s+нажим|по\s+клику|при\s+нажат|кнопк|button)/i.test(String(instruction || ''));
+
 const hasTailwindCdn = (html) => /cdn\.tailwindcss\.com/i.test(String(html || ''));
 
 const shrinkTailwindClasses = (className) => {
@@ -324,9 +334,53 @@ const ensureHrefInHtml = (html, href, label, opts = {}) => {
   }
 
   if (/<body[^>]*>/i.test(doc)) {
-    return doc.replace(/<body([^>]*)>/i, (m) => `${m}\n${linkHtml}`);
+    const wrapper = tailwind
+      ? `<div class="p-4">${linkHtml}</div>`
+      : `<div style="padding:16px">${linkHtml}</div>`;
+    return doc.replace(/<body([^>]*)>/i, (m) => `${m}\n${wrapper}`);
   }
   return doc;
+};
+
+const ensurePrimaryCtaNavigates = (html, href, targetText) => {
+  if (!targetText) return null;
+  const doc = String(html || '');
+  const safeHref = String(href || '').replace(/"/g, '&quot;');
+  const textNeedle = String(targetText).trim().toLowerCase();
+  if (!textNeedle) return null;
+
+  const normText = (s) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+
+  // Try <a ...>...</a>
+  const anchorRegex = /<a\b([^>]*?)>([\s\S]*?)<\/a>/gi;
+  let match;
+  while ((match = anchorRegex.exec(doc))) {
+    const attrs = match[1] || '';
+    const inner = match[2] || '';
+    const plain = normText(inner.replace(/<[^>]+>/g, ' '));
+    if (!plain.includes(textNeedle)) continue;
+    let nextAttrs = attrs;
+    if (/href\s*=/i.test(nextAttrs)) {
+      nextAttrs = nextAttrs.replace(/href\s*=\s*["'][^"']*["']/i, `href="${safeHref}"`);
+    } else {
+      nextAttrs = `href="${safeHref}" ${nextAttrs}`.trim();
+    }
+    return doc.slice(0, match.index) + `<a ${nextAttrs}>${inner}</a>` + doc.slice(match.index + match[0].length);
+  }
+
+  // Try <button ...>...</button> and convert to <a ...>
+  const buttonRegex = /<button\b([^>]*?)>([\s\S]*?)<\/button>/gi;
+  while ((match = buttonRegex.exec(doc))) {
+    const attrs = match[1] || '';
+    const inner = match[2] || '';
+    const plain = normText(inner.replace(/<[^>]+>/g, ' '));
+    if (!plain.includes(textNeedle)) continue;
+    const classMatch = attrs.match(/class\s*=\s*["']([^"']+)["']/i);
+    const classAttr = classMatch?.[1] ? ` class="${classMatch[1]}"` : '';
+    return doc.slice(0, match.index) + `<a href="${safeHref}"${classAttr}>${inner}</a>` + doc.slice(match.index + match[0].length);
+  }
+
+  return null;
 };
 
 const extractHtmlHead = (html) => {
@@ -1435,7 +1489,12 @@ ${assembledSections.join('\n\n')}
 	    const newTitle = extractHtmlTitle(nextNew);
 	    const placement = inferLinkPlacement(job.instruction);
 	    const linkLabel = inferLinkLabel(job.instruction, newTitle || 'Открыть страницу');
-	    const stitchedIndex = ensureHrefInHtml(indexHtml, resolvedNewFile, linkLabel, { placement });
+	    const clickText = inferPrimaryClickText(job.instruction);
+	    const ctaUpdated =
+	      wantsButtonNavigation(job.instruction) && clickText
+	        ? ensurePrimaryCtaNavigates(indexHtml, resolvedNewFile, clickText)
+	        : null;
+	    const stitchedIndex = ctaUpdated ?? ensureHrefInHtml(indexHtml, resolvedNewFile, linkLabel, { placement });
 	    const stitchedNew = shouldInjectBackLink(job.instruction)
 	      ? ensureHrefInHtml(nextNew, 'index.html', 'Назад', { placement: 'header' })
 	      : nextNew;
