@@ -12,6 +12,14 @@ const normalizeActiveJob = (activeJob) => {
   const lessonId = activeJob.lessonId || activeJob.lesson_id || null;
   const courseId = activeJob.courseId || activeJob.course_id || null;
   const status = activeJob.status || activeJob.state || null;
+  const error =
+    typeof activeJob.error === 'string'
+      ? activeJob.error
+      : (typeof activeJob.code === 'string' ? activeJob.code : null);
+  const errorDetails =
+    typeof activeJob.error_details === 'string'
+      ? activeJob.error_details
+      : (typeof activeJob.details === 'string' ? activeJob.details : null);
   const lastUpdatedByLessonId =
     activeJob.lastUpdatedByLessonId || activeJob.last_updated_by_lesson_id || null;
 
@@ -24,6 +32,8 @@ const normalizeActiveJob = (activeJob) => {
     startedAt: activeJob.startedAt || activeJob.started_at || null,
     updatedAt: activeJob.updatedAt || activeJob.updated_at || activeJob.heartbeat_at || null,
     lastEventId: activeJob.lastEventId || activeJob.last_event_id || null,
+    error,
+    error_details: errorDetails,
     last_updated_by_lesson_id: lastUpdatedByLessonId,
   };
 };

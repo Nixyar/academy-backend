@@ -540,7 +540,7 @@ const completeActiveJob = async (job, status, result = {}) => {
   return saved;
 };
 
-const failActiveJob = async (job, code) => {
+const failActiveJob = async (job, code, details) => {
   const now = new Date().toISOString();
   await mutateCourseProgress(job.userId, job.courseId, (progress) => {
     if (!progress.active_job || progress.active_job.jobId !== job.jobId) return null;
@@ -551,6 +551,7 @@ const failActiveJob = async (job, code) => {
         status: 'failed',
         updatedAt: now,
         error: code || 'FAILED',
+        error_details: typeof details === 'string' ? details : undefined,
       },
     };
   });
@@ -792,7 +793,7 @@ router.get('/stream', requireUser, async (req, res, next) => {
     emitStatus(job, 'error', code);
     broadcastSse(job, 'error', job.error);
     try {
-      await failActiveJob(job, code);
+      await failActiveJob(job, code, safeDetails || undefined);
     } catch {
       // ignore
     }
