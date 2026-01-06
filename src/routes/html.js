@@ -148,6 +148,34 @@ const isValidHtmlDocument = (html) => {
   return true;
 };
 
+const MAX_HTML_BYTES = 600 * 1024;
+
+const getUtf8Bytes = (value) => Buffer.byteLength(String(value || ''), 'utf8');
+
+const ensureHtmlWithinLimit = (filesByName) => {
+  if (!filesByName || typeof filesByName !== 'object' || Array.isArray(filesByName)) return null;
+
+  for (const [name, content] of Object.entries(filesByName)) {
+    const bytes = getUtf8Bytes(content);
+    if (bytes > MAX_HTML_BYTES) {
+      return { file: name, bytes, limit: MAX_HTML_BYTES };
+    }
+  }
+
+  return null;
+};
+
+const hasIndexHtmlInProgress = (progress) => {
+  const result = progress?.result;
+  const files = result?.files;
+
+  if (files && typeof files === 'object' && !Array.isArray(files)) {
+    return Object.prototype.hasOwnProperty.call(files, 'index.html');
+  }
+
+  return typeof result?.html === 'string';
+};
+
 const toWorkspaceResponse = (progress) => {
   const workspace = ensureWorkspace(progress);
   return {
@@ -545,7 +573,11 @@ ${currentCode}
 
     const sectionEntries = deriveSections(outline);
     if (!sectionEntries.length) {
-      await failActiveJob({ userId: user.id, courseId, jobId }, 'LLM_PLAN_NO_SECTIONS');
+      await completeActiveJob(
+        { userId: user.id, courseId, jobId, lessonId },
+        'failed',
+        { meta: { error: 'LLM_PLAN_NO_SECTIONS', last_llm_error: 'LLM_PLAN_NO_SECTIONS' } },
+      );
       return res
         .status(502)
         .json({ error: 'LLM_PLAN_NO_SECTIONS', details: JSON.stringify(outline).slice(0, 800) });
@@ -597,6 +629,12 @@ router.post('/edit', requireUser, async (req, res, next) => {
     }
 
     const { progress: current } = await loadCourseProgress(user.id, courseId.trim());
+    if (!hasIndexHtmlInProgress(current)) {
+      return res.status(400).json({
+        error: 'NO_INDEX_HTML',
+        details: 'index.html is missing; generate the site first',
+      });
+    }
     const workspace = ensureWorkspace(current);
     const targetFile = workspace.result.active_file || 'index.html';
     const currentHtml = workspace.result.files?.[targetFile] ?? '';
@@ -630,6 +668,14 @@ router.post('/edit', requireUser, async (req, res, next) => {
       return res.status(502).json({
         error: 'LLM_INVALID_HTML',
         details: stripFences(String(newHtml || '')).slice(0, 500),
+      });
+    }
+
+    const tooLarge = ensureHtmlWithinLimit({ [targetFile]: newHtml });
+    if (tooLarge) {
+      return res.status(502).json({
+        error: 'LLM_HTML_TOO_LARGE',
+        ...tooLarge,
       });
     }
 
@@ -680,6 +726,12 @@ router.post('/add-page', requireUser, async (req, res, next) => {
     }
 
     const { progress: current } = await loadCourseProgress(user.id, courseId.trim());
+    if (!hasIndexHtmlInProgress(current)) {
+      return res.status(400).json({
+        error: 'NO_INDEX_HTML',
+        details: 'index.html is missing; generate the site first',
+      });
+    }
     const workspace = ensureWorkspace(current);
     const files = workspace.result.files || { 'index.html': '' };
     const newFile = pickNextPageFilename(Object.keys(files));
@@ -741,6 +793,14 @@ router.post('/add-page', requireUser, async (req, res, next) => {
       return res.status(502).json({
         error: 'LLM_INVALID_HTML',
         details: 'index.html or new page html failed validation',
+      });
+    }
+
+    const tooLarge = ensureHtmlWithinLimit({ 'index.html': nextIndex, [newFile]: nextNew });
+    if (tooLarge) {
+      return res.status(502).json({
+        error: 'LLM_HTML_TOO_LARGE',
+        ...tooLarge,
       });
     }
 

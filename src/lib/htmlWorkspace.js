@@ -43,6 +43,8 @@ export const ensureWorkspace = (progress) => {
     activeFile = 'index.html';
   }
 
+  meta.pages_count = Object.keys(files).length;
+
   return {
     ...safeProgress,
     result: {
@@ -66,4 +68,3 @@ export const pickNextPageFilename = (existingFiles) => {
   while (names.has(`page-${n}.html`)) n += 1;
   return `page-${n}.html`;
 };
-
