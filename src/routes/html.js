@@ -10,7 +10,7 @@ import {
   mutateCourseProgress,
   saveCourseProgress,
 } from '../lib/courseProgress.js';
-import { ensureWorkspace, pickNextPageFilename } from '../lib/htmlWorkspace.js';
+import { ensureWorkspace } from '../lib/htmlWorkspace.js';
 
 const router = Router();
 
@@ -152,6 +152,65 @@ const isValidHtmlDocument = (html) => {
 const MAX_HTML_BYTES = 600 * 1024;
 
 const getUtf8Bytes = (value) => Buffer.byteLength(String(value || ''), 'utf8');
+
+const toSafeHtmlFilename = (value, fallback) => {
+  const raw = String(value || '').trim().toLowerCase();
+  const base = raw
+    .replace(/https?:\/\/[^/\s]+/g, '')
+    .replace(/[^a-z0-9а-яё\s_-]/gi, '')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^[-_]+|[-_]+$/g, '')
+    .slice(0, 48);
+  const ascii = base
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9_-]/g, '');
+  const name = ascii || fallback || 'page';
+  return `${name}.html`;
+};
+
+const pickUniqueFilename = (suggested, existing) => {
+  const used = new Set(Array.isArray(existing) ? existing : Object.keys(existing || {}));
+  const sanitized = String(suggested || '').trim();
+  const base = sanitized.endsWith('.html') ? sanitized.slice(0, -5) : sanitized;
+  const safeBase = base.replace(/[^a-z0-9_-]/gi, '').slice(0, 48) || 'page';
+  let candidate = `${safeBase}.html`;
+  let n = 2;
+  while (used.has(candidate)) {
+    candidate = `${safeBase}-${n}.html`;
+    n += 1;
+  }
+  return candidate;
+};
+
+const isSafeHtmlFilename = (name) => {
+  const s = String(name || '').trim();
+  if (!/\.html$/i.test(s)) return false;
+  if (s.includes('..') || s.includes('/') || s.includes('\\')) return false;
+  if (s.length > 80) return false;
+  return /^[a-zA-Z0-9._-]+\.html$/.test(s);
+};
+
+const ensureHrefInHtml = (html, href, label) => {
+  const doc = String(html || '');
+  const safeHref = String(href || '').replace(/"/g, '&quot;');
+  const safeLabel = String(label || href || 'Open').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  if (new RegExp(`href\\s*=\\s*["']${safeHref.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}["']`, 'i').test(doc)) {
+    return doc;
+  }
+
+  const linkHtml =
+    `<a href="${safeHref}" style="display:inline-block;margin:12px 0;padding:10px 14px;border-radius:12px;` +
+    `background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.14);color:#e5e7eb;` +
+    `text-decoration:none;font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,sans-serif">` +
+    `${safeLabel}</a>`;
+
+  if (/<body[^>]*>/i.test(doc)) {
+    return doc.replace(/<body([^>]*)>/i, (m) => `${m}\n<div style="padding:16px">${linkHtml}</div>`);
+  }
+  return doc;
+};
 
 const ensureHtmlWithinLimit = (filesByName) => {
   if (!filesByName || typeof filesByName !== 'object' || Array.isArray(filesByName)) return null;
@@ -1128,25 +1187,43 @@ ${assembledSections.join('\n\n')}
     emitStatus(job, 'ensure_workspace', 'ensure workspace', 0.15);
     const workspace = ensureWorkspace(current);
     const files = workspace.result.files || { 'index.html': '' };
-    const newFile = pickNextPageFilename(Object.keys(files));
     const indexHtml = files['index.html'] || '';
 
     const fileNames = Object.keys(files).sort();
     const otherFiles = fileNames.filter((name) => name !== 'index.html');
 
     emitStatus(job, 'calling_llm', 'adding page', 0.35);
-    const system = [
+    let system = [
       'Ты — генератор многостраничного HTML сайта.',
       'Верни ТОЛЬКО JSON объект без markdown и без code fences.',
       'Ключи — имена файлов, значения — полный HTML документ.',
       'Никаких пояснений, никакого текста вне JSON.',
     ].join('\n');
 
+    if (job.lessonId) {
+      try {
+        const { renderSystem } = await fetchLessonPrompts(job.lessonId);
+        system = `${renderSystem}\n\n${system}`;
+      } catch {
+        // fall back to generic system prompt
+      }
+    }
+
+    const suggested = pickUniqueFilename(
+      toSafeHtmlFilename(job.instruction, 'page'),
+      Object.keys(files),
+    );
+
     const prompt = [
-      `CRITICAL: Верни строго JSON вида: { "index.html": "<...>", "${newFile}": "<...>" }`,
+      'CRITICAL:',
+      '- Верни строго JSON объект.',
+      '- В JSON должны быть минимум 2 ключа: "index.html" и ОДИН новый *.html файл (можно назвать по смыслу).',
+      `- Рекомендуемое имя нового файла: "${suggested}" (если выберешь другое — оно должно быть безопасным и заканчиваться на .html).`,
       'Требования:',
-      `- Создай новый файл "${newFile}" по инструкции в том же стиле (шрифты/цвета/библиотеки можно копировать из index.html).`,
-      `- Обнови "index.html": добавь рабочую ссылку <a href="${newFile}">...</a> в навбар/меню/CTA (если навбар уже есть — аккуратно дополни).`,
+      '- Создай новую страницу по инструкции в том же стиле (шрифты/цвета/библиотеки можно копировать из index.html).',
+      '- Обнови "index.html": добавь рабочую ссылку <a href="NEW_PAGE.html">...</a> в навбар/меню/CTA (если навбар уже есть — аккуратно дополни).',
+      '- На новой странице добавь ссылку назад на index.html (и/или общий навбар).',
+      '- Не ломай существующую структуру: в index.html делай минимальные изменения, только чтобы добавить новую ссылку.',
       '- Не используй бандлеры; только CDN как в исходном HTML.',
       '- Верни полный HTML в обоих файлах (<!DOCTYPE> + <html>...).',
       '',
@@ -1160,15 +1237,27 @@ ${assembledSections.join('\n\n')}
       otherFiles.length ? `OTHER_FILES: ${otherFiles.join(', ')}` : 'OTHER_FILES: (none)',
     ].join('\n');
 
-    const llmText = await callLlm({
-      system,
-      prompt,
-      temperature: 0.3,
-      maxTokens: 8192,
-    });
+    const callForJson = async (attempt, previousOutput) => {
+      const extra =
+        attempt > 1 && typeof previousOutput === 'string'
+          ? `\n\nТЫ ВЕРНУЛ НЕ JSON. Исправь формат.\nВот твой прошлый ответ (обрезан):\n${stripFences(previousOutput).slice(0, 1200)}`
+          : '';
+      return callLlm({
+        system,
+        prompt: `${prompt}${extra}`,
+        temperature: 0.2,
+        maxTokens: 8192,
+      });
+    };
+
+    let llmText = await callForJson(1);
 
     emitStatus(job, 'validating', 'validating llm output', 0.6);
-    const parsed = extractFirstJsonObject(llmText);
+    let parsed = extractFirstJsonObject(llmText);
+    if (!parsed || typeof parsed !== 'object') {
+      llmText = await callForJson(2, llmText);
+      parsed = extractFirstJsonObject(llmText);
+    }
     if (!parsed || typeof parsed !== 'object') {
       throw Object.assign(new Error('LLM_JSON_PARSE_FAILED'), {
         status: 502,
@@ -1176,14 +1265,24 @@ ${assembledSections.join('\n\n')}
       });
     }
 
-    const nextIndex = parsed['index.html'];
-    const nextNew = parsed[newFile];
-    if (typeof nextIndex !== 'string' || typeof nextNew !== 'string') {
+    const nextIndexRaw = parsed['index.html'];
+    const candidateNewNames = Object.keys(parsed).filter((k) => k !== 'index.html');
+    const newNameFromLlm = candidateNewNames.find((k) => isSafeHtmlFilename(k)) || null;
+    const resolvedNewFile =
+      newNameFromLlm && !Object.prototype.hasOwnProperty.call(files, newNameFromLlm)
+        ? newNameFromLlm
+        : suggested;
+    const nextNewRaw = parsed[resolvedNewFile] ?? (newNameFromLlm ? parsed[newNameFromLlm] : undefined);
+
+    if (typeof nextIndexRaw !== 'string' || typeof nextNewRaw !== 'string') {
       throw Object.assign(new Error('LLM_JSON_MISSING_FILES'), {
         status: 502,
-        details: `Expected keys: "index.html", "${newFile}"`,
+        details: `Expected keys: "index.html" and a new ".html" file (suggested: "${suggested}")`,
       });
     }
+
+    const nextIndex = stripFences(normalizeLlmHtml(nextIndexRaw));
+    const nextNew = stripFences(normalizeLlmHtml(nextNewRaw));
 
     if (!isValidHtmlDocument(nextIndex) || !isValidHtmlDocument(nextNew)) {
       throw Object.assign(new Error('LLM_INVALID_HTML'), {
@@ -1192,7 +1291,10 @@ ${assembledSections.join('\n\n')}
       });
     }
 
-    const tooLarge = ensureHtmlWithinLimit({ 'index.html': nextIndex, [newFile]: nextNew });
+    const stitchedIndex = ensureHrefInHtml(nextIndex, resolvedNewFile, 'Открыть страницу');
+    const stitchedNew = ensureHrefInHtml(nextNew, 'index.html', 'Назад');
+
+    const tooLarge = ensureHtmlWithinLimit({ 'index.html': stitchedIndex, [resolvedNewFile]: stitchedNew });
     if (tooLarge) {
       throw Object.assign(new Error('LLM_HTML_TOO_LARGE'), { status: 502, details: tooLarge });
     }
@@ -1204,13 +1306,13 @@ ${assembledSections.join('\n\n')}
         ...workspace.result,
         files: {
           ...files,
-          'index.html': nextIndex,
-          [newFile]: nextNew,
+          'index.html': String(stitchedIndex),
+          [resolvedNewFile]: String(stitchedNew),
         },
-        active_file: newFile,
+        active_file: resolvedNewFile,
         meta: {
           ...(workspace.result.meta || {}),
-          last_added_file: newFile,
+          last_added_file: resolvedNewFile,
         },
       },
     });
