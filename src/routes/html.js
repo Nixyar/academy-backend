@@ -540,12 +540,21 @@ const completeActiveJob = async (job, status, result = {}) => {
   return saved;
 };
 
-const failActiveJob = async (job, code) =>
-  completeActiveJob(job, 'failed', {
-    meta: {
-      error: code || 'FAILED',
-    },
+const failActiveJob = async (job, code) => {
+  const now = new Date().toISOString();
+  await mutateCourseProgress(job.userId, job.courseId, (progress) => {
+    if (!progress.active_job || progress.active_job.jobId !== job.jobId) return null;
+    return {
+      ...progress,
+      active_job: {
+        ...progress.active_job,
+        status: 'failed',
+        updatedAt: now,
+        error: code || 'FAILED',
+      },
+    };
   });
+};
 
 const getLastHeartbeat = (activeJob, progressUpdatedAt) => {
   const raw =
@@ -599,6 +608,21 @@ const enqueueJob = async ({ userId, mode, courseId, lessonId, instruction }) => 
 
   const jobId = randomUUID();
   const nowIso = new Date().toISOString();
+
+  const currentResult =
+    currentProgress.result && typeof currentProgress.result === 'object' && !Array.isArray(currentProgress.result)
+      ? { ...currentProgress.result }
+      : { html: null, meta: {} };
+
+  const preservedMeta =
+    currentResult.meta && typeof currentResult.meta === 'object' && !Array.isArray(currentResult.meta)
+      ? { ...currentResult.meta }
+      : {};
+
+  // Never wipe the existing workspace on /start.
+  // The job will overwrite progress.result on successful completion.
+  const nextResult = { ...currentResult, meta: preservedMeta };
+
   const initialProgress = {
     ...currentProgress,
     active_job: {
@@ -610,13 +634,7 @@ const enqueueJob = async ({ userId, mode, courseId, lessonId, instruction }) => 
       startedAt: nowIso,
       updatedAt: nowIso,
     },
-    result: {
-      html: null,
-      meta:
-        currentProgress.result && typeof currentProgress.result.meta === 'object'
-          ? { ...currentProgress.result.meta }
-          : {},
-    },
+    result: nextResult,
   };
 
   await saveCourseProgress(userId, resolvedCourseId, initialProgress);
@@ -825,7 +843,6 @@ ${currentCode}
 
     const outline = extractFirstJsonObject(outlineText);
     if (!outline || typeof outline !== 'object') {
-      await completeActiveJob(job, 'failed', { meta: { error: 'LLM_PLAN_PARSE_FAILED' } });
       throw Object.assign(new Error('LLM_PLAN_PARSE_FAILED'), {
         status: 502,
         details: stripFences(String(outlineText || '')).slice(0, 800),
@@ -834,9 +851,6 @@ ${currentCode}
 
     const sectionEntries = deriveSections(outline);
     if (!sectionEntries.length) {
-      await completeActiveJob(job, 'failed', {
-        meta: { error: 'LLM_PLAN_NO_SECTIONS', last_llm_error: 'LLM_PLAN_NO_SECTIONS' },
-      });
       throw Object.assign(new Error('LLM_PLAN_NO_SECTIONS'), {
         status: 502,
         details: JSON.stringify(outline).slice(0, 800),
