@@ -126,6 +126,48 @@ const applyPatch = (progress, patch) => {
     };
   }
 
+  if (op === 'finish_course') {
+    const { lessonId } = patch;
+
+    if (typeof lessonId !== 'string' || !lessonId.trim()) {
+      return { error: 'INVALID_PATCH', details: 'finish_course requires lessonId' };
+    }
+
+    const now = patch.completedAt || new Date().toISOString();
+    const resolvedLessonId = lessonId.trim();
+    const lessons = ensureLessonNode(next, resolvedLessonId);
+
+    // When the course is finished, there should be no remaining "in_progress" lessons.
+    Object.entries(lessons).forEach(([id, lesson]) => {
+      if (!lesson || typeof lesson !== 'object') return;
+      if (lesson.status !== 'in_progress') return;
+      lessons[id] = {
+        ...lesson,
+        status: 'completed',
+        completed_at: lesson.completed_at || now,
+        last_viewed_at: lesson.last_viewed_at || new Date().toISOString(),
+      };
+    });
+
+    lessons[resolvedLessonId] = {
+      ...lessons[resolvedLessonId],
+      status: 'completed',
+      completed_at: now,
+      last_viewed_at: new Date().toISOString(),
+    };
+
+    return {
+      progress: {
+        ...next,
+        lessons,
+        course_status: 'completed',
+        course_completed_at: now,
+        resume_lesson_id: resolvedLessonId,
+        last_viewed_lesson_id: resolvedLessonId,
+      },
+    };
+  }
+
   return { error: 'UNKNOWN_PATCH_OP', details: `Unsupported op "${op}"` };
 };
 

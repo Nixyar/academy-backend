@@ -58,6 +58,8 @@ const escapeHtml = (str) =>
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
 
+const escapeRegExp = (value) => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 const stripFences = (s) =>
   String(s || '')
     .replace(/```json/gi, '')
@@ -107,6 +109,30 @@ const cleanHtmlFragment = (html) => {
   const bodyMatch = cleaned.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
   if (bodyMatch) return bodyMatch[1].trim();
   return cleaned.trim();
+};
+
+const forceFirstSectionId = (html, id) => {
+  const doc = String(html || '');
+  const safeId = String(id || '').trim();
+  if (!safeId) return doc;
+
+  const match = doc.match(/<section\b([^>]*)>/i);
+  if (!match) return doc;
+
+  const attrs = match[1] || '';
+  if (/\bid\s*=/i.test(attrs)) {
+    return doc.replace(/(<section\b[^>]*\bid\s*=\s*["'])([^"']+)(["'][^>]*>)/i, `$1${safeId}$3`);
+  }
+  return doc.replace(/<section\b([^>]*)>/i, `<section id="${safeId}"$1`);
+};
+
+const isValidSectionFragment = (html, id) => {
+  const doc = String(html || '').trim();
+  const safeId = String(id || '').trim();
+  if (!doc || !safeId) return false;
+  if (!/<section\b/i.test(doc)) return false;
+  const idRe = new RegExp(`<section\\b[^>]*\\bid\\s*=\\s*["']${escapeRegExp(safeId)}["']`, 'i');
+  return idRe.test(doc);
 };
 
 const tryExtractHtmlField = (text) => {
@@ -454,8 +480,15 @@ const buildFallbackSection = (id, spec) => {
     spec?.title || spec?.heading || spec?.label || spec?.name || `Section ${id || ''}`.trim();
   const desc = spec?.description || spec?.summary || '';
   const body = [
-    `<h2>${escapeHtml(heading)}</h2>`,
-    desc ? `<p>${escapeHtml(desc)}</p>` : '',
+    `<div class="mx-auto max-w-5xl px-6 py-16">`,
+    `<div class="rounded-3xl border border-white/10 bg-white/5 backdrop-blur-md p-8 shadow-2xl">`,
+    `<h2 class="text-2xl md:text-3xl font-extrabold tracking-tight text-white">${escapeHtml(heading)}</h2>`,
+    desc
+      ? `<p class="mt-4 text-base md:text-lg leading-relaxed text-white/80">${escapeHtml(desc)}</p>`
+      : '',
+    `<p class="mt-6 text-xs text-white/50 font-mono">Fallback section (LLM did not return valid HTML)</p>`,
+    `</div>`,
+    `</div>`,
   ]
     .filter(Boolean)
     .join('\n');
@@ -1320,11 +1353,36 @@ Return ONLY:
       }
 
       const sectionSpec = job.sectionSpecs?.[key] ?? job.outline?.[key];
-      const sectionHtml = cleanHtmlFragment(normalizeLlmHtml(sectionText));
-      const finalSection =
-        typeof sectionHtml === 'string' && sectionHtml.trim()
-          ? sectionHtml
-          : buildFallbackSection(key, sectionSpec);
+      let sectionHtml = cleanHtmlFragment(normalizeLlmHtml(sectionText));
+      if (/<section\b/i.test(sectionHtml)) sectionHtml = forceFirstSectionId(sectionHtml, key);
+
+      // Sometimes the model returns the section description text instead of HTML.
+      // Retry once with an explicit constraint before falling back.
+      if (!isValidSectionFragment(sectionHtml, key)) {
+        try {
+          const retryPrompt = `${String(sectionText || '').trim() ? sectionText : ''}\n\n${`
+CRITICAL:
+- Return ONLY a single <section id="${key}">...</section> element.
+- No extra text before/after. No markdown. No code fences.
+- If unsure, output a minimal valid <section> with heading + paragraph.\n`.trim()}`;
+
+          const retryText = await callLlm({
+            system: `${job.renderSystem}\n\n${sectionSystemSuffix.replace('{ID}', key)}\n${job.context}`,
+            prompt: retryPrompt,
+            temperature: 0.05,
+            maxTokens: 2000,
+          });
+
+          sectionHtml = cleanHtmlFragment(normalizeLlmHtml(retryText));
+          if (/<section\b/i.test(sectionHtml)) sectionHtml = forceFirstSectionId(sectionHtml, key);
+        } catch {
+          // ignore
+        }
+      }
+
+      const finalSection = isValidSectionFragment(sectionHtml, key)
+        ? sectionHtml
+        : buildFallbackSection(key, sectionSpec);
 
       job.sections[key] = finalSection;
       emit('section', { type: 'section', id: key, html: finalSection });
