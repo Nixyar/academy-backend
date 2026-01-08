@@ -17,22 +17,38 @@ const router = Router();
 const JOB_TTL_MS = 20 * 60 * 1000;
 const jobs = new Map(); // Map<jobId, Job>
 
-const CSS_SYSTEM_SUFFIX = `
-Ты генерируешь ГЛОБАЛЬНЫЙ CSS.
-Твоя задача:
-1. Определить :root переменные для цветов (на основе JSON темы).
-2. Добавить красивые @keyframes анимации (fade-in, slide-up), которые можно использовать в классах (например .animate-fade-in).
-3. Сделать кастомный скроллбар.
-Запрещено: HTML, JSON, markdown. Верни только CSS код.
-`;
-const SECTION_SYSTEM_SUFFIX = `
-Ты генерируешь только HTML фрагмент ОДНОЙ секции.
-Формат строго:
-<section id="{ID}"> ... </section>
+const parseLessonSettings = (lesson) => {
+  const raw = lesson?.settings;
+  if (!raw) return null;
+  if (typeof raw === 'object' && !Array.isArray(raw)) return raw;
+  if (typeof raw !== 'string') return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+};
 
-Запрещено: <html>, <head>, <body>, <main>, <style>, <script>, <title>, markdown.
-Не экранируй кавычки в атрибутах (никаких \\" внутри HTML).
-`;
+const getLlmOverrides = (lesson) => {
+  const settings = parseLessonSettings(lesson);
+  const llm = settings?.llm && typeof settings.llm === 'object' && !Array.isArray(settings.llm) ? settings.llm : null;
+
+  const readString = (...keys) => {
+    for (const key of keys) {
+      const value = llm?.[key];
+      if (typeof value === 'string' && value.trim()) return value.trim();
+    }
+    return null;
+  };
+
+  return {
+    cssSystemSuffix: readString('css_system_suffix', 'cssSystemSuffix', 'css_suffix', 'cssSuffix'),
+    sectionSystemSuffix: readString('section_system_suffix', 'sectionSystemSuffix', 'section_suffix', 'sectionSuffix'),
+    editSystemPrompt: readString('edit_system_prompt', 'editSystemPrompt', 'edit_prompt', 'editPrompt'),
+    addPageSystemPrompt: readString('add_page_system_prompt', 'addPageSystemPrompt', 'add_page_prompt', 'addPagePrompt'),
+  };
+};
 
 const escapeHtml = (str) =>
   String(str || '')
@@ -225,6 +241,8 @@ const inferPrimaryClickText = (instruction) => {
 };
 
 const wantsButtonNavigation = (instruction) => /(когда\s+нажим|по\s+клику|при\s+нажат|кнопк|button)/i.test(String(instruction || ''));
+
+const isJsonOrientedPrompt = (systemPrompt) => /\bjson\b/i.test(String(systemPrompt || ''));
 
 const hasTailwindCdn = (html) => /cdn\.tailwindcss\.com/i.test(String(html || ''));
 
@@ -636,7 +654,10 @@ const deriveSections = (outline) => {
   return [];
 };
 
-const fetchLessonPrompts = async (lessonId) => {
+const fetchLessonPrompts = async (lessonId, opts = {}) => {
+  const requirePlan = opts?.requirePlan !== false;
+  const requireRender = opts?.requireRender !== false;
+
   const { data: lesson, error } = await supabaseAdmin
     .from('lessons')
     .select('*')
@@ -666,18 +687,59 @@ const fetchLessonPrompts = async (lessonId) => {
   const normalizedPlan = typeof planSystem === 'string' ? planSystem.trim() : '';
   const normalizedRender = typeof renderSystem === 'string' ? renderSystem.trim() : '';
 
-  if (!normalizedPlan) {
+  if (requirePlan && !normalizedPlan) {
     const err = new Error('LESSON_LLM_PLAN_SYSTEM_PROMPT_MISSING');
     err.status = 400;
     throw err;
   }
-  if (!normalizedRender) {
+  if (requireRender && !normalizedRender) {
     const err = new Error('LESSON_LLM_RENDER_SYSTEM_PROMPT_MISSING');
     err.status = 400;
     throw err;
   }
 
-  return { planSystem: normalizedPlan, renderSystem: normalizedRender, lesson };
+  const overrides = getLlmOverrides(lesson);
+
+  // People sometimes paste JS arrays like: `'line',\n'line2'` into prompt fields — normalize to plain lines.
+  const normalizeCopiedJsArrayPrompt = (value) => {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    const lines = raw.split(/\r?\n/);
+    const quotedLike = lines.filter((l) => /^\s*['"]/.test(l.trim())).length;
+    if (quotedLike < Math.max(2, Math.floor(lines.length / 2))) return raw;
+
+    const cleaned = lines
+      .map((line) => {
+        let s = line.trim();
+        if (!s) return '';
+        // strip leading/trailing quotes and commas
+        if ((s.startsWith("'") && s.endsWith("',")) || (s.startsWith('"') && s.endsWith('",'))) {
+          s = s.slice(1, -2);
+        } else if ((s.startsWith("'") && s.endsWith("'")) || (s.startsWith('"') && s.endsWith('"'))) {
+          s = s.slice(1, -1);
+        }
+        return s;
+      })
+      .filter(Boolean)
+      .join('\n')
+      .trim();
+
+    return cleaned || raw;
+  };
+
+  return {
+    planSystem: normalizedPlan,
+    renderSystem: normalizeCopiedJsArrayPrompt(normalizedRender),
+    lesson,
+    overrides: {
+      ...overrides,
+      // Allow putting these suffixes directly into the render prompt field, but prefer settings.llm.*
+      cssSystemSuffix: overrides?.cssSystemSuffix ? normalizeCopiedJsArrayPrompt(overrides.cssSystemSuffix) : null,
+      sectionSystemSuffix: overrides?.sectionSystemSuffix ? normalizeCopiedJsArrayPrompt(overrides.sectionSystemSuffix) : null,
+      editSystemPrompt: overrides?.editSystemPrompt ? normalizeCopiedJsArrayPrompt(overrides.editSystemPrompt) : null,
+      addPageSystemPrompt: overrides?.addPageSystemPrompt ? normalizeCopiedJsArrayPrompt(overrides.addPageSystemPrompt) : null,
+    },
+  };
 };
 
 const callLlm = async ({ system, prompt, temperature, maxTokens, timeoutMs }) => {
@@ -972,6 +1034,7 @@ router.post('/start', requireUser, async (req, res, next) => {
       }
     } else {
       if (!requestedCourseId) return res.status(400).json({ error: 'courseId is required' });
+      if (!lessonId) return res.status(400).json({ error: 'lessonId is required' });
     }
 
     const { jobId } = await enqueueJob({
@@ -1002,12 +1065,15 @@ router.post('/edit', requireUser, async (req, res, next) => {
     if (typeof instruction !== 'string' || !instruction.trim()) {
       return res.status(400).json({ error: 'instruction is required' });
     }
+    if (typeof lessonId !== 'string' || !lessonId.trim()) {
+      return res.status(400).json({ error: 'lessonId is required' });
+    }
 
     const { jobId } = await enqueueJob({
       userId: user.id,
       mode: 'edit',
       courseId: courseId.trim(),
-      lessonId: typeof lessonId === 'string' ? lessonId.trim() : null,
+      lessonId: lessonId.trim(),
       instruction: instruction.trim(),
     });
 
@@ -1034,12 +1100,15 @@ router.post('/add-page', requireUser, async (req, res, next) => {
     if (typeof instruction !== 'string' || !instruction.trim()) {
       return res.status(400).json({ error: 'instruction is required' });
     }
+    if (typeof lessonId !== 'string' || !lessonId.trim()) {
+      return res.status(400).json({ error: 'lessonId is required' });
+    }
 
     const { jobId } = await enqueueJob({
       userId: user.id,
       mode: 'add_page',
       courseId: courseId.trim(),
-      lessonId: typeof lessonId === 'string' ? lessonId.trim() : null,
+      lessonId: lessonId.trim(),
       instruction: instruction.trim(),
     });
 
@@ -1096,11 +1165,19 @@ router.get('/stream', requireUser, async (req, res, next) => {
     const emit = (event, payload) => broadcastSse(job, event, payload);
 
     emitStatus(job, 'loading_progress', 'loading progress', 0.05);
-    const { planSystem, renderSystem, lesson } = await fetchLessonPrompts(job.lessonId);
+    const { planSystem, renderSystem, lesson, overrides } = await fetchLessonPrompts(job.lessonId);
     if (lesson.course_id !== job.courseId) {
       throw Object.assign(new Error('COURSE_ID_MISMATCH'), { status: 400, details: 'course mismatch' });
     }
     job.renderSystem = renderSystem;
+    const cssSystemSuffix = overrides?.cssSystemSuffix;
+    const sectionSystemSuffix = overrides?.sectionSystemSuffix;
+    if (!cssSystemSuffix) {
+      throw Object.assign(new Error('LESSON_LLM_CSS_SYSTEM_SUFFIX_MISSING'), { status: 400 });
+    }
+    if (!sectionSystemSuffix) {
+      throw Object.assign(new Error('LESSON_LLM_SECTION_SYSTEM_SUFFIX_MISSING'), { status: 400 });
+    }
 
     const { progress: current } = await loadCourseProgress(job.userId, job.courseId);
     const workspace = ensureWorkspace(current);
@@ -1169,7 +1246,7 @@ ${currentCode}
       ].join('\n');
 
       const cssText = await callLlm({
-        system: `${job.renderSystem}\n\n${CSS_SYSTEM_SUFFIX}\n${job.context}`,
+        system: `${job.renderSystem}\n\n${cssSystemSuffix}\n${job.context}`,
         prompt: cssPrompt,
         temperature: 0.2,
         maxTokens: 1800,
@@ -1225,7 +1302,7 @@ Return ONLY:
 `;
 
         sectionText = await callLlm({
-          system: `${job.renderSystem}\n\n${SECTION_SYSTEM_SUFFIX.replace('{ID}', key)}\n${job.context}`,
+          system: `${job.renderSystem}\n\n${sectionSystemSuffix.replace('{ID}', key)}\n${job.context}`,
           prompt: sectionPrompt,
           temperature: 0.15,
           maxTokens: 2000,
@@ -1332,12 +1409,22 @@ ${assembledSections.join('\n\n')}
     const currentHtml = workspace.result.files?.[targetFile] ?? '';
 
     emitStatus(job, 'calling_llm', 'editing html', 0.35);
-    const system = [
-      'Ты — HTML Editor.',
-      'Редактируй существующий HTML документ минимально, строго по инструкции.',
-      'НЕ используй markdown и code fences.',
-      'Верни только полный HTML документ (включая <!DOCTYPE> и <html>), без пояснений.',
-    ].join('\n');
+    if (!job.lessonId) {
+      throw Object.assign(new Error('LESSON_ID_REQUIRED_FOR_EDIT'), { status: 400 });
+    }
+
+    const { renderSystem, overrides } = await fetchLessonPrompts(job.lessonId, {
+      requirePlan: false,
+      requireRender: true,
+    });
+
+    const system = overrides?.editSystemPrompt || renderSystem;
+    if (!system) {
+      throw Object.assign(new Error('LESSON_LLM_RENDER_SYSTEM_PROMPT_MISSING'), { status: 400 });
+    }
+    if (isJsonOrientedPrompt(system)) {
+      throw Object.assign(new Error('LESSON_LLM_RENDER_SYSTEM_PROMPT_JSON_NOT_ALLOWED'), { status: 400 });
+    }
 
     const prompt = [
       'ИНСТРУКЦИЯ:',
@@ -1422,24 +1509,22 @@ ${assembledSections.join('\n\n')}
     const otherFiles = fileNames.filter((name) => name !== 'index.html');
 
     emitStatus(job, 'calling_llm', 'adding page', 0.35);
-    const genericSystem = [
-      'Ты — генератор HTML страницы для многостраничного сайта.',
-      'Верни ТОЛЬКО полный HTML документ (<!DOCTYPE> + <html>...), без markdown и без code fences.',
-      'Никаких пояснений и текста вне HTML.',
-      'Старайся сохранить стиль и компоненты исходного сайта.',
-    ].join('\n');
+    if (!job.lessonId) {
+      throw Object.assign(new Error('LESSON_ID_REQUIRED_FOR_ADD_PAGE'), { status: 400 });
+    }
 
-	    let system = genericSystem;
+    const { renderSystem, overrides } = await fetchLessonPrompts(job.lessonId, {
+      requirePlan: false,
+      requireRender: true,
+    });
 
-	    if (job.lessonId) {
-	      try {
-	        const { renderSystem } = await fetchLessonPrompts(job.lessonId);
-	        // If lesson render prompt is JSON-oriented, it conflicts with add_page (HTML output) — skip it.
-	        system = /json/i.test(renderSystem) ? genericSystem : `${renderSystem}\n\n${genericSystem}`;
-	      } catch {
-	        // fall back to generic system prompt
-	      }
-	    }
+    const system = overrides?.addPageSystemPrompt || renderSystem;
+    if (!system) {
+      throw Object.assign(new Error('LESSON_LLM_RENDER_SYSTEM_PROMPT_MISSING'), { status: 400 });
+    }
+    if (isJsonOrientedPrompt(system)) {
+      throw Object.assign(new Error('LESSON_LLM_RENDER_SYSTEM_PROMPT_JSON_NOT_ALLOWED'), { status: 400 });
+    }
 
     const resolvedNewFile = pickUniqueFilename(
       toSafeHtmlFilename(job.instruction, 'page'),
