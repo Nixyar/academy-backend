@@ -44,6 +44,8 @@ const env = {
   cookieSecure,
   nodeEnv: process.env.NODE_ENV,
   llmApiUrl: process.env.LLM_API_URL || 'http://95.81.99.208/v1/llm/generate',
+  termsVersion: process.env.TERMS_VERSION || 'v1',
+  privacyVersion: process.env.PRIVACY_VERSION || 'v1',
 };
 
 export default env;
