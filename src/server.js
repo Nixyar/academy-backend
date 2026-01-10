@@ -9,6 +9,7 @@ import htmlRouter from './routes/html.js';
 import contentRouter from './routes/content.js';
 import progressRouter from './routes/progress.js';
 import purchasesRouter from './routes/purchases.js';
+import paymentsRouter from './routes/payments.js';
 
 const app = express();
 
@@ -61,6 +62,7 @@ api.get('/health', (req, res) => {
 api.use('/auth', authRouter);
 api.use('/me', meRouter);
 api.use('/purchases', purchasesRouter);
+api.use('/payments', paymentsRouter);
 api.use('/lessons', llmRouter);
 api.use('/v1/html', htmlRouter);
 api.use('/', progressRouter);
