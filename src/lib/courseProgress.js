@@ -127,7 +127,7 @@ export const loadCourseProgress = async (userId, courseId, opts = {}) => {
     ? 'progress->active_job, updated_at'
     : 'progress, updated_at';
 
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
     const query = supabaseAdmin
       .from('user_course_progress')
       .select(selectFields)
@@ -146,9 +146,9 @@ export const loadCourseProgress = async (userId, courseId, opts = {}) => {
     }
 
     lastError = error;
-    if (attempt < 3 && isRetryableSupabaseMessage(error.message)) {
+    if (attempt < 2 && isRetryableSupabaseMessage(error.message)) {
       // Exponential backoff with jitter
-      await sleep(500 * attempt + Math.floor(Math.random() * 300));
+      await sleep(1000 * attempt + Math.floor(Math.random() * 500));
       continue;
     }
     break;

@@ -30,32 +30,28 @@ const stripProgressForList = (progress) => {
   const next = { ...normalized };
 
   if (next.result && typeof next.result === 'object' && !Array.isArray(next.result)) {
-    const meta =
-      next.result.meta && typeof next.result.meta === 'object' && !Array.isArray(next.result.meta)
-        ? next.result.meta
-        : {};
-    const active_file =
-      typeof next.result.active_file === 'string' && next.result.active_file.trim()
-        ? next.result.active_file
-        : undefined;
-
     next.result = {
-      meta,
-      ...(active_file ? { active_file } : {}),
+      meta: next.result.meta || {},
+      active_file: next.result.active_file,
     };
   }
 
-  // Legacy heavy fields
-  if ('result_html' in next) delete next.result_html;
-
-  const lessonsRaw = next.lessons && typeof next.lessons === 'object' && !Array.isArray(next.lessons)
-    ? next.lessons
-    : {};
+  // Heavy lessons data
+  const lessonsRaw = next.lessons || {};
   const strippedLessons = {};
+
   Object.entries(lessonsRaw).forEach(([lessonId, value]) => {
-    strippedLessons[lessonId] = stripLessonHeavyFields(value);
+    if (value && typeof value === 'object') {
+      // ONLY keep status and completion info for the list view
+      strippedLessons[lessonId] = {
+        status: value.status,
+        completedAt: value.completedAt || value.completed_at,
+      };
+    }
   });
+
   next.lessons = strippedLessons;
+  if ('result_html' in next) delete next.result_html;
 
   return next;
 };

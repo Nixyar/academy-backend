@@ -953,39 +953,33 @@ const normalizeMode = (value) => {
   return raw;
 };
 
-const enqueueJob = async ({ userId, mode, courseId, lessonId, instruction }) => {
+const enqueueJob = async ({ userId, mode, courseId, lessonId, instruction, lessonData }) => {
   let resolvedCourseId = courseId;
   let resolvedLessonId = lessonId || null;
 
-  if (mode === 'create') {
-    const { lesson } = await fetchLessonPrompts(lessonId);
-    resolvedCourseId = lesson.course_id;
+  // 1. Resolve courseId from passed data or fetch if missing
+  if (mode === 'create' || !resolvedCourseId) {
+    const data = lessonData || (await fetchLessonPrompts(lessonId));
+    resolvedCourseId = data.lesson.course_id;
     resolvedLessonId = lessonId;
   }
 
+  // 2. Load current state (already optimized to use retries)
   const { progress: currentProgress, updatedAt: progressUpdatedAt } = await loadCourseProgress(
     userId,
     resolvedCourseId,
   );
+
   const activeJob = currentProgress.active_job;
   const existingJob = activeJob?.jobId ? jobs.get(activeJob.jobId) : null;
   const lastHeartbeat = getLastHeartbeat(activeJob, progressUpdatedAt);
+
+  // A job is stale if it says it's running but hasn't updated in 5m OR isn't in memory
   const isStale =
     isActiveJobRunning(activeJob) &&
     (!lastHeartbeat || Date.now() - lastHeartbeat > ACTIVE_JOB_TTL_MS || !existingJob);
 
-  if (isStale && activeJob) {
-    await saveCourseProgress(userId, resolvedCourseId, {
-      ...currentProgress,
-      active_job: {
-        ...activeJob,
-        status: 'failed',
-        updatedAt: new Date().toISOString(),
-        error: 'STALE_HEARTBEAT',
-      },
-    });
-  }
-
+  // If a job is ALREADY running and NOT stale, don't start a new one
   if (isActiveJobRunning(activeJob) && !isStale) {
     return { jobId: activeJob.jobId, already_running: true, courseId: resolvedCourseId };
   }
@@ -993,6 +987,7 @@ const enqueueJob = async ({ userId, mode, courseId, lessonId, instruction }) => 
   const jobId = randomUUID();
   const nowIso = new Date().toISOString();
 
+  // 3. Prepare next result metadata
   const currentResult =
     currentProgress.result && typeof currentProgress.result === 'object' && !Array.isArray(currentProgress.result)
       ? { ...currentProgress.result }
@@ -1003,10 +998,9 @@ const enqueueJob = async ({ userId, mode, courseId, lessonId, instruction }) => 
       ? { ...currentResult.meta }
       : {};
 
-  // Never wipe the existing workspace on /start.
-  // The job will overwrite progress.result on successful completion.
   const nextResult = { ...currentResult, meta: preservedMeta };
 
+  // 4. Atomic update: Set new job (this might overwrite stale job in one go)
   const initialProgress = {
     ...currentProgress,
     active_job: {
@@ -1021,6 +1015,7 @@ const enqueueJob = async ({ userId, mode, courseId, lessonId, instruction }) => 
     result: nextResult,
   };
 
+  // ONE SINGLE SAVE instead of two. This reduces DB lock time and network RTT.
   await saveCourseProgress(userId, resolvedCourseId, initialProgress);
 
   const job = ensureJob(jobId, {
@@ -1030,14 +1025,18 @@ const enqueueJob = async ({ userId, mode, courseId, lessonId, instruction }) => 
     lessonId: resolvedLessonId,
     instruction,
   });
+
   job.status = 'queued';
   emitStatus(job, 'queued', 'queued', 0);
-  await heartbeatActiveJob(job, { status: 'queued' });
+
+  // Background heartbeat (optional, but keep for consistency)
+  void heartbeatActiveJob(job, { status: 'queued' }).catch(() => { });
 
   return { jobId, already_running: false, courseId: resolvedCourseId };
 };
 
 router.post('/start', requireUser, async (req, res, next) => {
+  const startedAt = Date.now();
   try {
     const body = req.body || {};
     const mode = normalizeMode(body.mode);
@@ -1050,41 +1049,43 @@ router.post('/start', requireUser, async (req, res, next) => {
     const { user } = req;
 
     if (!['create', 'edit', 'add_page'].includes(mode)) {
-      return res.status(400).json({
-        error: 'INVALID_MODE',
-        details: 'mode must be create|edit|add_page',
-      });
+      return res.status(400).json({ error: 'INVALID_MODE' });
     }
 
     if (!instruction) {
       return res.status(400).json({ error: 'instruction is required' });
     }
 
-    if (mode === 'create') {
-      if (!lessonId) return res.status(400).json({ error: 'lessonId is required' });
-      const { lesson } = await fetchLessonPrompts(lessonId);
-      const derivedCourseId = lesson.course_id;
-      if (requestedCourseId && requestedCourseId !== derivedCourseId) {
-        return res.status(400).json({
-          error: 'COURSE_ID_MISMATCH',
-          details: `lesson.course_id != courseId (${derivedCourseId} != ${requestedCourseId})`,
-        });
+    let lessonData = null;
+    if (lessonId) {
+      // Fetch lesson once and reuse it
+      lessonData = await fetchLessonPrompts(lessonId);
+      const derivedCourseId = lessonData.lesson.course_id;
+      if (mode === 'create' && requestedCourseId && requestedCourseId !== derivedCourseId) {
+        return res.status(400).json({ error: 'COURSE_ID_MISMATCH' });
       }
-    } else {
-      if (!requestedCourseId) return res.status(400).json({ error: 'courseId is required' });
-      if (!lessonId) return res.status(400).json({ error: 'lessonId is required' });
+    } else if (mode === 'create') {
+      return res.status(400).json({ error: 'lessonId is required for create mode' });
     }
 
     const { jobId } = await enqueueJob({
       userId: user.id,
       mode,
-      courseId: requestedCourseId || null,
+      courseId: requestedCourseId || lessonData?.lesson?.course_id || null,
       lessonId,
       instruction,
+      // Pass the already fetched lesson data to avoid double fetch in enqueueJob
+      lessonData,
     });
+
+    const elapsed = Date.now() - startedAt;
+    if (elapsed > 2000) {
+      console.warn(`[slow-start-request] jobId=${jobId} took ${elapsed}ms for user ${user.id}`);
+    }
 
     return res.json({ jobId });
   } catch (e) {
+    console.error('[start-error]', e);
     if (e?.status) {
       return res.status(e.status).json({ error: e.message, details: e.details });
     }
@@ -1564,7 +1565,7 @@ ${assembledSections.join('\n\n')}
     broadcastSse(job, 'done', { type: 'done', ...job.result });
   };
 
-	  const runAddPageJob = async (job) => {
+  const runAddPageJob = async (job) => {
     emitStatus(job, 'loading_progress', 'loading progress', 0.05);
     const { progress: current } = await loadCourseProgress(job.userId, job.courseId);
     if (!hasIndexHtmlInProgress(current)) {
@@ -1628,35 +1629,35 @@ ${assembledSections.join('\n\n')}
       '- Добавь на странице ссылку назад на index.html (можно в nav или сверху).',
     ].join('\n');
 
-	    const newPageText = await callLlm({
-	      system,
-	      prompt,
-	      temperature: 0.2,
-	      maxTokens: 3000,
-	      timeoutMs: LLM_ADD_PAGE_TIMEOUT_MS,
-	    });
+    const newPageText = await callLlm({
+      system,
+      prompt,
+      temperature: 0.2,
+      maxTokens: 3000,
+      timeoutMs: LLM_ADD_PAGE_TIMEOUT_MS,
+    });
 
     emitStatus(job, 'validating', 'validating llm output', 0.6);
-	    const nextNew = stripFences(normalizeLlmHtml(newPageText));
-	    if (!isValidHtmlDocument(nextNew)) {
-	      throw Object.assign(new Error('LLM_INVALID_HTML'), {
-	        status: 502,
-	        details: stripFences(String(nextNew || '')).slice(0, 800),
-	      });
-	    }
+    const nextNew = stripFences(normalizeLlmHtml(newPageText));
+    if (!isValidHtmlDocument(nextNew)) {
+      throw Object.assign(new Error('LLM_INVALID_HTML'), {
+        status: 502,
+        details: stripFences(String(nextNew || '')).slice(0, 800),
+      });
+    }
 
-	    const newTitle = extractHtmlTitle(nextNew);
-	    const placement = inferLinkPlacement(job.instruction);
-	    const linkLabel = inferLinkLabel(job.instruction, newTitle || 'Открыть страницу');
-	    const clickText = inferPrimaryClickText(job.instruction);
-	    const ctaUpdated =
-	      wantsButtonNavigation(job.instruction) && clickText
-	        ? ensurePrimaryCtaNavigates(indexHtml, resolvedNewFile, clickText)
-	        : null;
-	    const stitchedIndex = ctaUpdated ?? ensureHrefInHtml(indexHtml, resolvedNewFile, linkLabel, { placement });
-	    const stitchedNew = shouldInjectBackLink(job.instruction)
-	      ? ensureHrefInHtml(nextNew, 'index.html', 'Назад', { placement: 'header' })
-	      : nextNew;
+    const newTitle = extractHtmlTitle(nextNew);
+    const placement = inferLinkPlacement(job.instruction);
+    const linkLabel = inferLinkLabel(job.instruction, newTitle || 'Открыть страницу');
+    const clickText = inferPrimaryClickText(job.instruction);
+    const ctaUpdated =
+      wantsButtonNavigation(job.instruction) && clickText
+        ? ensurePrimaryCtaNavigates(indexHtml, resolvedNewFile, clickText)
+        : null;
+    const stitchedIndex = ctaUpdated ?? ensureHrefInHtml(indexHtml, resolvedNewFile, linkLabel, { placement });
+    const stitchedNew = shouldInjectBackLink(job.instruction)
+      ? ensureHrefInHtml(nextNew, 'index.html', 'Назад', { placement: 'header' })
+      : nextNew;
 
     const tooLarge = ensureHtmlWithinLimit({ 'index.html': stitchedIndex, [resolvedNewFile]: stitchedNew });
     if (tooLarge) {
