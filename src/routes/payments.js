@@ -53,6 +53,13 @@ const isLikelyPaidTbankStatus = (status) => {
   return ['confirmed', 'paid'].includes(normalized);
 };
 
+const isInvalidTokenResponse = (json) => {
+  if (!json || typeof json !== 'object') return false;
+  const errorCode = String(json.ErrorCode || json.errorCode || '').trim();
+  const details = String(json.Details || json.details || '').toLowerCase();
+  return errorCode === '204' && details.includes('токен');
+};
+
 const buildReceipt = ({ userEmail, courseTitle, amountKopeks }) => {
   if (!env.tbankSendReceipt) return null;
 
@@ -199,31 +206,55 @@ router.post('/tbank/init', requireUser, async (req, res, next) => {
         : null,
     });
 
-    const Token = createTbankToken(initPayload, env.tbankPassword);
-    const body = { ...initPayload, Token };
+    const callInit = async (payload) => {
+      const Token = createTbankToken(payload, env.tbankPassword);
+      const body = { ...payload, Token };
+      const response = await fetchWithTimeout(getApiUrl('/Init'), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      }, {
+        name: 'tbank-init',
+        timeoutMs: env.tbankTimeoutMs,
+        slowMs: env.externalSlowLogMs,
+        logger: (event, data) => console.warn(`[${event}]`, data),
+      });
+      const parsed = await readTbankJsonSafe(response);
+      return { response, ...parsed };
+    };
 
-    const response = await fetchWithTimeout(getApiUrl('/Init'), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-    }, {
-      name: 'tbank-init',
-      timeoutMs: env.tbankTimeoutMs,
-      slowMs: env.externalSlowLogMs,
-      logger: (event, data) => console.warn(`[${event}]`, data),
-    });
-
-    const { json, text: responseText } = await readTbankJsonSafe(response);
-    if (!response.ok || !json) {
+    let initAttempt = await callInit(initPayload);
+    if (!initAttempt.response.ok || !initAttempt.json) {
       await supabaseAdmin.from('course_purchases').update({ status: 'failed' }).eq('id', created.id);
       console.error('[tbank-init-failed]', {
-        status: response.status,
-        statusText: response.statusText,
-        body: json,
-        bodyText: responseText || null,
+        status: initAttempt.response.status,
+        statusText: initAttempt.response.statusText,
+        body: initAttempt.json,
+        bodyText: initAttempt.text || null,
       });
       return sendApiError(res, 502, 'PAYMENT_PROVIDER_ERROR');
     }
+
+    // If Receipt is enabled, some terminals validate Token without Receipt included.
+    // Retry once excluding Receipt if the provider explicitly complains about token.
+    if (receipt && isInvalidTokenResponse(initAttempt.json)) {
+      const retryPayload = { ...initPayload };
+      delete retryPayload.Receipt;
+      console.warn('[tbank-init-invalid-token-retry]', { orderId, withReceipt: true });
+      initAttempt = await callInit(retryPayload);
+      if (!initAttempt.response.ok || !initAttempt.json) {
+        await supabaseAdmin.from('course_purchases').update({ status: 'failed' }).eq('id', created.id);
+        console.error('[tbank-init-failed]', {
+          status: initAttempt.response.status,
+          statusText: initAttempt.response.statusText,
+          body: initAttempt.json,
+          bodyText: initAttempt.text || null,
+        });
+        return sendApiError(res, 502, 'PAYMENT_PROVIDER_ERROR');
+      }
+    }
+
+    const json = initAttempt.json;
 
     const paymentId = json.PaymentId || json.paymentId || null;
     const paymentUrl = json.PaymentURL || json.PaymentUrl || json.paymentUrl || null;

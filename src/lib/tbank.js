@@ -5,13 +5,10 @@ const sha256Hex = (value) => crypto.createHash('sha256').update(value, 'utf8').d
 export const createTbankToken = (payload, password) => {
   const entries = Object.entries(payload || {})
     .filter(([key, value]) => key !== 'Token' && value !== undefined && value !== null)
-    // TBank expects nested objects (e.g. Receipt) to be stringified as JSON.
-    // Do not reorder object keys: JSON.stringify preserves insertion order.
     .map(([key, value]) => [String(key), typeof value === 'object' ? JSON.stringify(value) : String(value)]);
 
-  entries.push(['Password', String(password || '')]);
   entries.sort(([a], [b]) => a.localeCompare(b));
 
-  const concatenated = entries.map(([, value]) => value).join('');
+  const concatenated = entries.map(([, value]) => value).join('') + String(password || '');
   return sha256Hex(concatenated);
 };
