@@ -5,6 +5,7 @@ import supabaseAdmin from '../lib/supabaseAdmin.js';
 import requireUser from '../middleware/requireUser.js';
 import { fetchWithTimeout } from '../lib/fetchWithTimeout.js';
 import { Semaphore } from '../lib/semaphore.js';
+import { sendApiError, toPublicError } from '../lib/publicErrors.js';
 import {
   ACTIVE_JOB_TTL_MS,
   isActiveJobRunning,
@@ -188,8 +189,6 @@ const normalizeLlmHtml = (raw) => {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const LLM_TIMEOUT_MS = env.llmTimeoutMs;
-const LLM_ADD_PAGE_TIMEOUT_MS = Math.max(env.llmTimeoutMs, 30000);
 const LLM_RETRYABLE_STATUSES = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
 
 const isValidHtmlDocument = (html) => {
@@ -778,7 +777,7 @@ const fetchLessonPrompts = async (lessonId, opts = {}) => {
   };
 };
 
-const callLlm = async ({ system, prompt, temperature, maxTokens, timeoutMs }) => {
+const callLlm = async ({ system, prompt, temperature, maxTokens }) => {
   let lastError;
 
   for (let attempt = 1; attempt <= 3; attempt += 1) {
@@ -1048,25 +1047,25 @@ router.post('/start', requireUser, async (req, res, next) => {
         : (typeof body.prompt === 'string' ? body.prompt.trim() : '');
     const { user } = req;
 
-    if (!['create', 'edit', 'add_page'].includes(mode)) {
-      return res.status(400).json({ error: 'INVALID_MODE' });
-    }
+	    if (!['create', 'edit', 'add_page'].includes(mode)) {
+	      return sendApiError(res, 400, 'INVALID_MODE');
+	    }
 
-    if (!instruction) {
-      return res.status(400).json({ error: 'instruction is required' });
-    }
+	    if (!instruction) {
+	      return sendApiError(res, 400, 'INVALID_REQUEST');
+	    }
 
     let lessonData = null;
     if (lessonId) {
       // Fetch lesson once and reuse it
       lessonData = await fetchLessonPrompts(lessonId);
       const derivedCourseId = lessonData.lesson.course_id;
-      if (mode === 'create' && requestedCourseId && requestedCourseId !== derivedCourseId) {
-        return res.status(400).json({ error: 'COURSE_ID_MISMATCH' });
-      }
-    } else if (mode === 'create') {
-      return res.status(400).json({ error: 'lessonId is required for create mode' });
-    }
+	      if (mode === 'create' && requestedCourseId && requestedCourseId !== derivedCourseId) {
+	        return sendApiError(res, 400, 'COURSE_ID_MISMATCH');
+	      }
+	    } else if (mode === 'create') {
+	      return sendApiError(res, 400, 'INVALID_REQUEST');
+	    }
 
     const { jobId } = await enqueueJob({
       userId: user.id,
@@ -1084,29 +1083,29 @@ router.post('/start', requireUser, async (req, res, next) => {
     }
 
     return res.json({ jobId });
-  } catch (e) {
-    console.error('[start-error]', e);
-    if (e?.status) {
-      return res.status(e.status).json({ error: e.message, details: e.details });
-    }
-    return next(e);
-  }
-});
+	  } catch (e) {
+	    console.error('[start-error]', e);
+	    if (e?.status) {
+	      return sendApiError(res, e.status, String(e.message || 'INTERNAL_ERROR'), { details: e.details });
+	    }
+	    return next(e);
+	  }
+	});
 
 router.post('/edit', requireUser, async (req, res, next) => {
   try {
     const { courseId, instruction, lessonId } = req.body || {};
     const { user } = req;
 
-    if (typeof courseId !== 'string' || !courseId.trim()) {
-      return res.status(400).json({ error: 'courseId is required' });
-    }
-    if (typeof instruction !== 'string' || !instruction.trim()) {
-      return res.status(400).json({ error: 'instruction is required' });
-    }
-    if (typeof lessonId !== 'string' || !lessonId.trim()) {
-      return res.status(400).json({ error: 'lessonId is required' });
-    }
+	    if (typeof courseId !== 'string' || !courseId.trim()) {
+	      return sendApiError(res, 400, 'INVALID_REQUEST');
+	    }
+	    if (typeof instruction !== 'string' || !instruction.trim()) {
+	      return sendApiError(res, 400, 'INVALID_REQUEST');
+	    }
+	    if (typeof lessonId !== 'string' || !lessonId.trim()) {
+	      return sendApiError(res, 400, 'INVALID_REQUEST');
+	    }
 
     const { jobId } = await enqueueJob({
       userId: user.id,
@@ -1117,31 +1116,31 @@ router.post('/edit', requireUser, async (req, res, next) => {
     });
 
     return res.json({ jobId });
-  } catch (error) {
-    if (error.message === 'FAILED_TO_FETCH_PROGRESS') {
-      return res.status(500).json({ error: 'FAILED_TO_FETCH_PROGRESS' });
-    }
-    if (error.message === 'FAILED_TO_SAVE_PROGRESS') {
-      return res.status(500).json({ error: 'FAILED_TO_SAVE_PROGRESS' });
-    }
-    return next(error);
-  }
-});
+	  } catch (error) {
+	    if (error.message === 'FAILED_TO_FETCH_PROGRESS') {
+	      return sendApiError(res, 500, 'FAILED_TO_FETCH_PROGRESS');
+	    }
+	    if (error.message === 'FAILED_TO_SAVE_PROGRESS') {
+	      return sendApiError(res, 500, 'FAILED_TO_SAVE_PROGRESS');
+	    }
+	    return next(error);
+	  }
+	});
 
 router.post('/add-page', requireUser, async (req, res, next) => {
   try {
     const { courseId, instruction, lessonId } = req.body || {};
     const { user } = req;
 
-    if (typeof courseId !== 'string' || !courseId.trim()) {
-      return res.status(400).json({ error: 'courseId is required' });
-    }
-    if (typeof instruction !== 'string' || !instruction.trim()) {
-      return res.status(400).json({ error: 'instruction is required' });
-    }
-    if (typeof lessonId !== 'string' || !lessonId.trim()) {
-      return res.status(400).json({ error: 'lessonId is required' });
-    }
+	    if (typeof courseId !== 'string' || !courseId.trim()) {
+	      return sendApiError(res, 400, 'INVALID_REQUEST');
+	    }
+	    if (typeof instruction !== 'string' || !instruction.trim()) {
+	      return sendApiError(res, 400, 'INVALID_REQUEST');
+	    }
+	    if (typeof lessonId !== 'string' || !lessonId.trim()) {
+	      return sendApiError(res, 400, 'INVALID_REQUEST');
+	    }
 
     const { jobId } = await enqueueJob({
       userId: user.id,
@@ -1152,16 +1151,16 @@ router.post('/add-page', requireUser, async (req, res, next) => {
     });
 
     return res.json({ jobId });
-  } catch (error) {
-    if (error.message === 'FAILED_TO_FETCH_PROGRESS') {
-      return res.status(500).json({ error: 'FAILED_TO_FETCH_PROGRESS' });
-    }
-    if (error.message === 'FAILED_TO_SAVE_PROGRESS') {
-      return res.status(500).json({ error: 'FAILED_TO_SAVE_PROGRESS' });
-    }
-    return next(error);
-  }
-});
+	  } catch (error) {
+	    if (error.message === 'FAILED_TO_FETCH_PROGRESS') {
+	      return sendApiError(res, 500, 'FAILED_TO_FETCH_PROGRESS');
+	    }
+	    if (error.message === 'FAILED_TO_SAVE_PROGRESS') {
+	      return sendApiError(res, 500, 'FAILED_TO_SAVE_PROGRESS');
+	    }
+	    return next(error);
+	  }
+	});
 
 router.get('/stream', requireUser, async (req, res, next) => {
   let pingInterval;
@@ -1184,8 +1183,12 @@ router.get('/stream', requireUser, async (req, res, next) => {
   const failJob = async (job, err) => {
     const code = err?.message || 'FAILED';
     const safeDetails = normalizeErrorDetails(err?.details) || normalizeErrorDetails(err?.message);
+    const publicError = toPublicError({
+      error: code,
+      details: safeDetails || undefined,
+    });
     job.status = 'error';
-    job.error = { error: code, details: safeDetails || undefined };
+    job.error = publicError;
     // eslint-disable-next-line no-console
     console.error('[html.stream] job failed', {
       jobId: job.jobId,
@@ -1197,7 +1200,7 @@ router.get('/stream', requireUser, async (req, res, next) => {
       details: safeDetails || undefined,
       stack: err?.stack ? String(err.stack).slice(0, 4000) : undefined,
     });
-    emitStatus(job, 'error', code);
+    emitStatus(job, 'error', publicError.message || code);
     broadcastSse(job, 'error', job.error);
     try {
       await failActiveJob(job, code, safeDetails || undefined);
@@ -1637,7 +1640,6 @@ ${assembledSections.join('\n\n')}
       prompt,
       temperature: 0.2,
       maxTokens: 3000,
-      timeoutMs: LLM_ADD_PAGE_TIMEOUT_MS,
     });
 
     emitStatus(job, 'validating', 'validating llm output', 0.6);
@@ -1706,7 +1708,7 @@ ${assembledSections.join('\n\n')}
 
     const job = typeof jobId === 'string' ? jobs.get(jobId) : null;
     if (!job || job.userId !== req.user.id) {
-      return res.status(404).json({ error: 'JOB_NOT_FOUND' });
+      return sendApiError(res, 404, 'JOB_NOT_FOUND');
     }
 
     res.set({
@@ -1785,7 +1787,7 @@ router.get('/result', requireUser, (req, res) => {
     typeof debug === 'string' && ['1', 'true', 'yes', 'on'].includes(debug.toLowerCase());
 
   if (!job || job.userId !== req.user.id) {
-    return res.status(404).json({ error: 'JOB_NOT_FOUND' });
+    return sendApiError(res, 404, 'JOB_NOT_FOUND');
   }
 
   return res.json({

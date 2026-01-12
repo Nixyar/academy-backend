@@ -45,7 +45,6 @@ const env = {
   nodeEnv: process.env.NODE_ENV,
   llmApiUrl: process.env.LLM_API_URL || 'http://95.81.102.68/v1/llm/generate',
   supabaseTimeoutMs: Number(process.env.SUPABASE_TIMEOUT_MS) || 8000,
-  llmTimeoutMs: Number(process.env.LLM_TIMEOUT_MS) || 30000,
   tbankTimeoutMs: Number(process.env.TBANK_TIMEOUT_MS) || 15000,
   llmMaxConcurrency: Number(process.env.LLM_MAX_CONCURRENCY) || 2,
   slowLogMs: Number(process.env.SLOW_LOG_MS) || 1500,

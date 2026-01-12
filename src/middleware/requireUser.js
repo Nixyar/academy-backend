@@ -1,5 +1,6 @@
 import { jwtVerify } from 'jose';
 import env from '../config/env.js';
+import { sendApiError } from '../lib/publicErrors.js';
 
 const jwtSecret = new TextEncoder().encode(env.supabaseJwtSecret);
 const normalizeSupabaseUrl = (value) => String(value || '').trim().replace(/\/+$/, '');
@@ -13,7 +14,7 @@ export default async function requireUser(req, res, next) {
   const token = req.cookies?.sb_access_token;
 
   if (!token) {
-    return res.status(401).json({ error: 'Access token required' });
+    return sendApiError(res, 401, 'UNAUTHORIZED');
   }
 
   try {
@@ -25,6 +26,6 @@ export default async function requireUser(req, res, next) {
     };
     return next();
   } catch (error) {
-    return res.status(401).json({ error: 'Invalid or expired token' });
+    return sendApiError(res, 401, 'UNAUTHORIZED');
   }
 }

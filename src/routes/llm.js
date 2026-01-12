@@ -3,6 +3,7 @@ import env from '../config/env.js';
 import supabaseAdmin from '../lib/supabaseAdmin.js';
 import { fetchWithTimeout } from '../lib/fetchWithTimeout.js';
 import { Semaphore } from '../lib/semaphore.js';
+import { sendApiError } from '../lib/publicErrors.js';
 
 const router = Router();
 const llmSemaphore = new Semaphore(env.llmMaxConcurrency);
@@ -53,7 +54,7 @@ router.post('/:lessonId/llm', async (req, res, next) => {
     const { prompt, mode, target_file, files } = req.body || {};
 
     if (typeof prompt !== 'string' || !prompt.trim()) {
-      return res.status(400).json({ error: 'prompt is required' });
+      return sendApiError(res, 400, 'INVALID_REQUEST');
     }
 
     // --- REZ: Context Injection ---
@@ -88,12 +89,9 @@ If you need to create a new file, include it too.
       .maybeSingle();
 
     if (lessonError) {
-      return res.status(500).json({
-        error: 'FAILED_TO_FETCH_LESSON',
-        details: lessonError.message,
-      });
+      return sendApiError(res, 500, 'INTERNAL_ERROR');
     }
-    if (!lesson) return res.status(404).json({ error: 'LESSON_NOT_FOUND' });
+    if (!lesson) return sendApiError(res, 404, 'LESSON_NOT_FOUND');
 
     const fallbackSystem = typeof lesson.llm_system_prompt === 'string' ? lesson.llm_system_prompt : null;
     const planSystem = (
@@ -107,10 +105,10 @@ If you need to create a new file, include it too.
     const normalizedRender = typeof renderSystem === 'string' ? renderSystem.trim() : '';
 
     if (!normalizedPlan) {
-      return res.status(400).json({ error: 'LESSON_LLM_PLAN_SYSTEM_PROMPT_MISSING' });
+      return sendApiError(res, 400, 'INVALID_REQUEST');
     }
     if (!normalizedRender) {
-      return res.status(400).json({ error: 'LESSON_LLM_RENDER_SYSTEM_PROMPT_MISSING' });
+      return sendApiError(res, 400, 'INVALID_REQUEST');
     }
 
     // Plan request

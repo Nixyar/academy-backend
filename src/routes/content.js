@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import supabaseAnon from '../lib/supabaseAnon.js';
 import env from '../config/env.js';
+import { sendApiError } from '../lib/publicErrors.js';
 
 const router = Router();
 
@@ -18,21 +19,14 @@ const parseEq = (value) => {
 
 const normalizeParam = (value) => String(value || '').trim();
 
-const withTimeout = async (promiseFactory, timeoutMs) => {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await promiseFactory(controller.signal);
-  } finally {
-    clearTimeout(timeoutId);
-  }
-};
-
 router.get('/courses', async (req, res, next) => {
   try {
     const { status, slug, access } = req.query || {};
 
-    let query = supabaseAnon.from('courses').select('*').order('sort_order', { ascending: true });
+    let query = supabaseAnon
+      .from('courses')
+      .select('id,slug,title,description,cover_url,access,status,label,labels,sort_order,price,sale_price,currency')
+      .order('sort_order', { ascending: true });
 
     if (status) {
       query = query.eq('status', parseEq(status));
@@ -49,7 +43,7 @@ router.get('/courses', async (req, res, next) => {
     const { data, error } = await query;
 
     if (error) {
-      return res.status(500).json({ error: 'FAILED_TO_FETCH_COURSES' });
+      return sendApiError(res, 500, 'FAILED_TO_FETCH_COURSES', { details: error });
     }
 
     return res.json(data);
@@ -64,7 +58,8 @@ router.get('/lessons', async (req, res, next) => {
 
     // Use selective fields to avoid fetching heavy LLM prompts for the whole list.
     // We include 'blocks' as they are required for rendering the lesson content.
-    const selectFields = 'id, course_id, slug, title, lesson_type, sort_order, lesson_type_ru, blocks, settings';
+    const selectFields =
+      'id,course_id,slug,title,lesson_type,sort_order,lesson_type_ru,blocks,unlock_rule,settings,mode,settings_mode';
     let query = supabaseAnon.from('lessons').select(selectFields).order('sort_order', { ascending: true });
 
     if (courseId) {
@@ -127,18 +122,20 @@ router.get('/lessons', async (req, res, next) => {
 
       return res.json(data);
     } catch (err) {
-      const isAbort =
-        err && typeof err === 'object' && ('name' in err ? err.name === 'AbortError' : false);
+      const message = err instanceof Error ? err.message : String(err);
+      const isTimeout = message.includes('timeout') || message.includes('aborted');
       const status = typeof (err && typeof err === 'object' && 'status' in err ? err.status : null) === 'number'
         ? err.status
-        : (isAbort ? 504 : 500);
+        : (isTimeout ? 504 : 500);
+
       // eslint-disable-next-line no-console
-      console.error('[CRITICAL] Lessons request failed:', err instanceof Error ? err.message : String(err));
-      return res.status(status).json({
-        error: isAbort ? 'DATABASE_TIMEOUT' : 'DATABASE_ERROR',
-        message: err instanceof Error ? err.message : String(err),
-        details: err && typeof err === 'object' && 'details' in err ? err.details : undefined,
-      });
+      console.error('[lessons-error]', { status, error: message });
+      return sendApiError(
+        res,
+        status,
+        isTimeout ? 'DATABASE_TIMEOUT' : (message === 'FAILED_TO_FETCH_LESSONS' ? 'FAILED_TO_FETCH_LESSONS' : 'DATABASE_ERROR'),
+        { details: err && typeof err === 'object' && 'details' in err ? err.details : undefined },
+      );
     } finally {
       lessonsInFlight.delete(cacheKey);
     }

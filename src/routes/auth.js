@@ -3,6 +3,7 @@ import { Router } from 'express';
 import env from '../config/env.js';
 import supabaseAdmin from '../lib/supabaseAdmin.js';
 import { createTimedFetch } from '../lib/fetchWithTimeout.js';
+import { sendApiError } from '../lib/publicErrors.js';
 
 const router = Router();
 
@@ -52,7 +53,7 @@ router.post('/session', (req, res) => {
   const { access_token: accessToken, refresh_token: refreshToken } = req.body || {};
 
   if (!accessToken || !refreshToken) {
-    return res.status(400).json({ error: 'access_token and refresh_token are required' });
+    return sendApiError(res, 400, 'INVALID_REQUEST');
   }
 
   res.cookie('sb_access_token', accessToken, cookieOptions(ACCESS_MAX_AGE_MS));
@@ -65,13 +66,13 @@ router.post('/login', async (req, res) => {
   const { email, password } = req.body || {};
 
   if (!email || !password) {
-    return res.status(400).json({ error: 'email and password are required' });
+    return sendApiError(res, 400, 'INVALID_REQUEST');
   }
 
   const { data, error } = await supabaseAuth.auth.signInWithPassword({ email, password });
 
   if (error || !data?.session || !data?.user) {
-    return res.status(401).json({ error: 'INVALID_CREDENTIALS' });
+    return sendApiError(res, 401, 'UNAUTHORIZED');
   }
 
   setAuthCookies(res, data.session);
@@ -90,7 +91,7 @@ router.post('/register', async (req, res) => {
   const { name, email, password } = req.body || {};
 
   if (!name || !email || !password) {
-    return res.status(400).json({ error: 'name, email and password are required' });
+    return sendApiError(res, 400, 'INVALID_REQUEST');
   }
 
   const { data, error } = await supabaseAuth.auth.signUp({
@@ -104,7 +105,7 @@ router.post('/register', async (req, res) => {
   });
 
   if (error || !data?.user) {
-    return res.status(400).json({ error: 'SIGNUP_FAILED' });
+    return sendApiError(res, 400, 'INVALID_REQUEST');
   }
 
   const profilePayload = {
@@ -118,7 +119,7 @@ router.post('/register', async (req, res) => {
     .upsert(profilePayload);
 
   if (profileError) {
-    return res.status(500).json({ error: 'PROFILE_CREATE_FAILED' });
+    return sendApiError(res, 500, 'INTERNAL_ERROR');
   }
 
   if (data.session) {
@@ -139,13 +140,13 @@ router.post('/refresh', async (req, res) => {
   const refreshToken = req.cookies?.sb_refresh_token;
 
   if (!refreshToken) {
-    return res.status(401).json({ error: 'NO_REFRESH_TOKEN' });
+    return sendApiError(res, 401, 'UNAUTHORIZED');
   }
 
   const { data, error } = await supabaseAuth.auth.refreshSession({ refresh_token: refreshToken });
 
   if (error || !data.session) {
-    return res.status(401).json({ error: 'REFRESH_FAILED' });
+    return sendApiError(res, 401, 'UNAUTHORIZED');
   }
 
   const { access_token: accessToken, refresh_token: newRefreshToken } = data.session;

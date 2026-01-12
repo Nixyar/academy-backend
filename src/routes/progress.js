@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import env from '../config/env.js';
 import supabaseAdmin from '../lib/supabaseAdmin.js';
+import { sendApiError } from '../lib/publicErrors.js';
 import {
   ACTIVE_JOB_TTL_MS,
   isActiveJobRunning,
@@ -221,7 +222,7 @@ router.get('/courses/:courseId/progress', requireUser, async (req, res, next) =>
     const onlyStatus = req.query?.onlyStatus === 'true';
 
     if (!courseId) {
-      return res.status(400).json({ error: 'courseId is required' });
+      return sendApiError(res, 400, 'INVALID_REQUEST');
     }
 
     // Optimization: if client asks for only status, or by default for status checks, use partial fetch
@@ -257,7 +258,7 @@ router.get('/courses/:courseId/progress', requireUser, async (req, res, next) =>
     });
   } catch (error) {
     if (error.message === 'FAILED_TO_FETCH_PROGRESS') {
-      return res.status(500).json({ error: 'FAILED_TO_FETCH_PROGRESS' });
+      return sendApiError(res, 500, 'FAILED_TO_FETCH_PROGRESS');
     }
 
     return next(error);
@@ -271,11 +272,11 @@ router.put('/courses/:courseId/progress', requireUser, async (req, res, next) =>
     const bodyProgress = req.body?.progress ?? req.body;
 
     if (!courseId) {
-      return res.status(400).json({ error: 'courseId is required' });
+      return sendApiError(res, 400, 'INVALID_REQUEST');
     }
 
     if (!bodyProgress || typeof bodyProgress !== 'object' || Array.isArray(bodyProgress)) {
-      return res.status(400).json({ error: 'INVALID_PROGRESS', details: 'progress must be an object' });
+      return sendApiError(res, 400, 'INVALID_REQUEST');
     }
 
     const normalized = normalizeProgress(bodyProgress);
@@ -288,7 +289,7 @@ router.put('/courses/:courseId/progress', requireUser, async (req, res, next) =>
     });
   } catch (error) {
     if (error.message === 'FAILED_TO_SAVE_PROGRESS') {
-      return res.status(500).json({ error: 'FAILED_TO_SAVE_PROGRESS' });
+      return sendApiError(res, 500, 'FAILED_TO_SAVE_PROGRESS');
     }
 
     return next(error);
@@ -303,11 +304,11 @@ router.patch('/courses/:courseId/progress', requireUser, async (req, res, next) 
     const op = patch?.op;
 
     if (!courseId) {
-      return res.status(400).json({ error: 'courseId is required' });
+      return sendApiError(res, 400, 'INVALID_REQUEST');
     }
 
     if (!op) {
-      return res.status(400).json({ error: 'INVALID_PATCH', details: 'op is required' });
+      return sendApiError(res, 400, 'INVALID_PATCH');
     }
 
     if (op === 'lesson_prompt') {
@@ -327,9 +328,7 @@ router.patch('/courses/:courseId/progress', requireUser, async (req, res, next) 
       });
 
       if (rpcError) {
-        return res
-          .status(500)
-          .json({ error: 'FAILED_TO_SAVE_LESSON_PROMPT', details: rpcError.message });
+        return sendApiError(res, 500, 'FAILED_TO_SAVE_LESSON_PROMPT', { details: rpcError.message });
       }
 
       const { progress: saved, updatedAt } = await loadCourseProgress(user.id, courseId);
@@ -345,7 +344,7 @@ router.patch('/courses/:courseId/progress', requireUser, async (req, res, next) 
     const result = applyPatch(current, patch);
 
     if (result.error) {
-      return res.status(400).json({ error: result.error, details: result.details });
+      return sendApiError(res, 400, String(result.error || 'INVALID_PATCH'), { details: result.details });
     }
 
     const { progress: saved, updatedAt } = await saveCourseProgress(user.id, courseId, result.progress);
@@ -357,11 +356,11 @@ router.patch('/courses/:courseId/progress', requireUser, async (req, res, next) 
     });
   } catch (error) {
     if (error.message === 'FAILED_TO_FETCH_PROGRESS') {
-      return res.status(500).json({ error: 'FAILED_TO_FETCH_PROGRESS' });
+      return sendApiError(res, 500, 'FAILED_TO_FETCH_PROGRESS');
     }
 
     if (error.message === 'FAILED_TO_SAVE_PROGRESS') {
-      return res.status(500).json({ error: 'FAILED_TO_SAVE_PROGRESS' });
+      return sendApiError(res, 500, 'FAILED_TO_SAVE_PROGRESS');
     }
 
     return next(error);
@@ -374,7 +373,7 @@ router.get('/courses/:courseId/resume', requireUser, async (req, res, next) => {
     const { user } = req;
 
     if (!courseId) {
-      return res.status(400).json({ error: 'courseId is required' });
+      return sendApiError(res, 400, 'INVALID_REQUEST');
     }
 
     const { progress } = await loadCourseProgress(user.id, courseId);
@@ -397,7 +396,7 @@ router.get('/courses/:courseId/resume', requireUser, async (req, res, next) => {
       .order('sort_order', { ascending: true });
 
     if (error) {
-      return res.status(500).json({ error: 'FAILED_TO_FETCH_LESSONS' });
+      return sendApiError(res, 500, 'FAILED_TO_FETCH_LESSONS', { details: error.message });
     }
 
     if (!lessons || lessons.length === 0) {
@@ -415,7 +414,7 @@ router.get('/courses/:courseId/resume', requireUser, async (req, res, next) => {
     return res.json({ lesson_id: nextLesson.id });
   } catch (error) {
     if (error.message === 'FAILED_TO_FETCH_PROGRESS') {
-      return res.status(500).json({ error: 'FAILED_TO_FETCH_PROGRESS' });
+      return sendApiError(res, 500, 'FAILED_TO_FETCH_PROGRESS');
     }
 
     return next(error);
@@ -428,10 +427,10 @@ router.patch('/v1/progress/active-file', requireUser, async (req, res, next) => 
     const { user } = req;
 
     if (typeof courseId !== 'string' || !courseId.trim()) {
-      return res.status(400).json({ error: 'courseId is required' });
+      return sendApiError(res, 400, 'INVALID_REQUEST');
     }
     if (typeof file !== 'string' || !file.trim()) {
-      return res.status(400).json({ error: 'file is required' });
+      return sendApiError(res, 400, 'INVALID_REQUEST');
     }
 
     const { progress: current } = await loadCourseProgress(user.id, courseId.trim());
@@ -439,7 +438,7 @@ router.patch('/v1/progress/active-file', requireUser, async (req, res, next) => 
 
     const files = workspace.result?.files || {};
     if (!Object.prototype.hasOwnProperty.call(files, file)) {
-      return res.status(400).json({ error: 'FILE_NOT_FOUND', details: `Unknown file "${file}"` });
+      return sendApiError(res, 400, 'FILE_NOT_FOUND');
     }
 
     const next = ensureWorkspace({
@@ -466,11 +465,11 @@ router.patch('/v1/progress/active-file', requireUser, async (req, res, next) => 
     });
   } catch (error) {
     if (error.message === 'FAILED_TO_FETCH_PROGRESS') {
-      return res.status(500).json({ error: 'FAILED_TO_FETCH_PROGRESS' });
+      return sendApiError(res, 500, 'FAILED_TO_FETCH_PROGRESS');
     }
 
     if (error.message === 'FAILED_TO_SAVE_PROGRESS') {
-      return res.status(500).json({ error: 'FAILED_TO_SAVE_PROGRESS' });
+      return sendApiError(res, 500, 'FAILED_TO_SAVE_PROGRESS');
     }
 
     return next(error);
@@ -483,7 +482,7 @@ router.get('/progress', requireUser, async (req, res, next) => {
     const { user } = req;
 
     if (!courseIdsParam) {
-      return res.status(400).json({ error: 'courseIds query param is required' });
+      return sendApiError(res, 400, 'INVALID_REQUEST');
     }
 
     const courseIds = String(courseIdsParam)
@@ -492,7 +491,7 @@ router.get('/progress', requireUser, async (req, res, next) => {
       .filter(Boolean);
 
     if (courseIds.length === 0) {
-      return res.status(400).json({ error: 'courseIds query param is required' });
+      return sendApiError(res, 400, 'INVALID_REQUEST');
     }
 
     const cacheKey = `${user.id}:${[...courseIds].sort().join(',')}`;
@@ -523,12 +522,12 @@ router.get('/progress', requireUser, async (req, res, next) => {
       const { data, error } = await supabaseAdmin
         .from('user_course_progress')
         .select(`
-          course_id, 
-          progress->resume_lesson_id, 
-          progress->last_viewed_lesson_id, 
-          progress->active_job, 
-          progress->lessons,
-          progress->result->meta
+          course_id,
+          resume_lesson_id:progress->>resume_lesson_id,
+          last_viewed_lesson_id:progress->>last_viewed_lesson_id,
+          active_job:progress->active_job,
+          lessons:progress->lessons,
+          meta:progress->result->meta
         `)
         .eq('user_id', user.id)
         .in('course_id', courseIds);
@@ -591,11 +590,12 @@ router.get('/progress', requireUser, async (req, res, next) => {
         error: message,
       });
 
-      return res.status(isTimeout ? 504 : 500).json({
-        error: isTimeout ? 'DATABASE_TIMEOUT' : 'FAILED_TO_FETCH_PROGRESS',
-        message,
-        details: err.details || null,
-      });
+      return sendApiError(
+        res,
+        isTimeout ? 504 : 500,
+        isTimeout ? 'DATABASE_TIMEOUT' : 'FAILED_TO_FETCH_PROGRESS',
+        { details: err.details || null },
+      );
     } finally {
       // Clean up in-flight map
       if (inFlightProgressList.get(cacheKey) === fetchPromise) {

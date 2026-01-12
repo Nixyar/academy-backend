@@ -5,6 +5,7 @@ import supabaseAdmin from '../lib/supabaseAdmin.js';
 import env from '../config/env.js';
 import { createTbankToken } from '../lib/tbank.js';
 import { fetchWithTimeout } from '../lib/fetchWithTimeout.js';
+import { sendApiError } from '../lib/publicErrors.js';
 
 const router = Router();
 
@@ -34,11 +35,11 @@ const isLikelyPaidTbankStatus = (status) => {
 router.post('/tbank/init', requireUser, async (req, res, next) => {
   try {
     if (!env.tbankTerminalKey || !env.tbankPassword) {
-      return res.status(500).json({ error: 'TBANK_NOT_CONFIGURED' });
+      return sendApiError(res, 500, 'INTERNAL_ERROR');
     }
 
     const courseId = String(req.body?.courseId || '').trim();
-    if (!courseId) return res.status(400).json({ error: 'courseId is required' });
+    if (!courseId) return sendApiError(res, 400, 'INVALID_REQUEST');
 
     const { data: course, error: courseError } = await supabaseAdmin
       .from('courses')
@@ -47,13 +48,13 @@ router.post('/tbank/init', requireUser, async (req, res, next) => {
       .maybeSingle();
 
     if (courseError) {
-      return res.status(500).json({ error: 'FAILED_TO_LOAD_COURSE' });
+      return sendApiError(res, 500, 'INTERNAL_ERROR');
     }
-    if (!course) return res.status(404).json({ error: 'COURSE_NOT_FOUND' });
+    if (!course) return sendApiError(res, 404, 'COURSE_NOT_FOUND');
 
     const amountRub = safeInt(course.sale_price ?? course.price);
-    if (amountRub === null) return res.status(400).json({ error: 'COURSE_PRICE_INVALID' });
-    if (amountRub <= 0) return res.status(400).json({ error: 'COURSE_IS_FREE' });
+    if (amountRub === null) return sendApiError(res, 400, 'INVALID_REQUEST');
+    if (amountRub <= 0) return sendApiError(res, 400, 'INVALID_REQUEST');
 
     const amountKopeks = amountRub * 100;
     const orderId = crypto.randomUUID();
@@ -82,7 +83,7 @@ router.post('/tbank/init', requireUser, async (req, res, next) => {
       .single();
 
     if (insertError) {
-      return res.status(500).json({ error: 'FAILED_TO_CREATE_PURCHASE' });
+      return sendApiError(res, 500, 'INTERNAL_ERROR');
     }
 
     const initPayload = {
@@ -112,7 +113,7 @@ router.post('/tbank/init', requireUser, async (req, res, next) => {
     const json = await response.json().catch(() => null);
     if (!response.ok || !json) {
       await supabaseAdmin.from('course_purchases').update({ status: 'failed' }).eq('id', created.id);
-      return res.status(502).json({ error: 'TBANK_INIT_FAILED' });
+      return sendApiError(res, 502, 'INTERNAL_ERROR');
     }
 
     const paymentId = json.PaymentId || json.paymentId || null;
@@ -124,7 +125,7 @@ router.post('/tbank/init', requireUser, async (req, res, next) => {
         .from('course_purchases')
         .update({ status: String(json.Status || json.status || 'failed'), payment_id: paymentId })
         .eq('id', created.id);
-      return res.status(400).json({ error: 'TBANK_INIT_REJECTED', details: json });
+      return sendApiError(res, 400, 'INVALID_REQUEST');
     }
 
     await supabaseAdmin
@@ -141,25 +142,25 @@ router.post('/tbank/init', requireUser, async (req, res, next) => {
 router.post('/tbank/notification', async (req, res, next) => {
   try {
     if (!env.tbankTerminalKey || !env.tbankPassword) {
-      return res.status(500).json({ error: 'TBANK_NOT_CONFIGURED' });
+      return sendApiError(res, 500, 'INTERNAL_ERROR');
     }
 
     const payload = req.body && typeof req.body === 'object' ? req.body : {};
     const incomingToken = String(payload.Token || payload.token || '');
     const terminalKey = String(payload.TerminalKey || payload.terminalKey || '');
-    if (!incomingToken || !terminalKey) return res.status(400).json({ error: 'INVALID_NOTIFICATION' });
-    if (terminalKey !== env.tbankTerminalKey) return res.status(403).json({ error: 'INVALID_TERMINAL' });
+    if (!incomingToken || !terminalKey) return sendApiError(res, 400, 'INVALID_REQUEST');
+    if (terminalKey !== env.tbankTerminalKey) return sendApiError(res, 403, 'FORBIDDEN');
 
     const expected = createTbankToken(payload, env.tbankPassword);
     if (expected.toLowerCase() !== incomingToken.toLowerCase()) {
-      return res.status(403).json({ error: 'INVALID_TOKEN' });
+      return sendApiError(res, 403, 'FORBIDDEN');
     }
 
     const orderId = String(payload.OrderId || payload.orderId || '').trim();
     const paymentId = String(payload.PaymentId || payload.paymentId || '').trim() || null;
     const status = String(payload.Status || payload.status || '').trim().toLowerCase();
 
-    if (!orderId) return res.status(400).json({ error: 'MISSING_ORDER_ID' });
+    if (!orderId) return sendApiError(res, 400, 'INVALID_REQUEST');
 
     const updates = {
       status: status || 'unknown',
@@ -180,11 +181,11 @@ router.post('/tbank/notification', async (req, res, next) => {
 router.post('/tbank/sync', requireUser, async (req, res, next) => {
   try {
     if (!env.tbankTerminalKey || !env.tbankPassword) {
-      return res.status(500).json({ error: 'TBANK_NOT_CONFIGURED' });
+      return sendApiError(res, 500, 'INTERNAL_ERROR');
     }
 
     const orderId = String(req.body?.orderId || '').trim();
-    if (!orderId) return res.status(400).json({ error: 'orderId is required' });
+    if (!orderId) return sendApiError(res, 400, 'INVALID_REQUEST');
 
     const { user } = req;
     const { data: purchase, error: purchaseError } = await supabaseAdmin
@@ -194,8 +195,8 @@ router.post('/tbank/sync', requireUser, async (req, res, next) => {
       .eq('order_id', orderId)
       .maybeSingle();
 
-    if (purchaseError) return res.status(500).json({ error: 'FAILED_TO_LOAD_PURCHASE' });
-    if (!purchase) return res.status(404).json({ error: 'PURCHASE_NOT_FOUND' });
+    if (purchaseError) return sendApiError(res, 500, 'INTERNAL_ERROR');
+    if (!purchase) return sendApiError(res, 404, 'PURCHASE_NOT_FOUND');
 
     if (!purchase.payment_id) {
       return res.json({ status: purchase.status, courseId: purchase.course_id, paidAt: purchase.paid_at });
@@ -220,7 +221,7 @@ router.post('/tbank/sync', requireUser, async (req, res, next) => {
 
     const json = await response.json().catch(() => null);
     if (!response.ok || !json) {
-      return res.status(502).json({ error: 'TBANK_GET_STATE_FAILED' });
+      return sendApiError(res, 502, 'INTERNAL_ERROR');
     }
 
     const tbankStatusRaw = json.Status || json.status || purchase.status || 'unknown';

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import requireUser from '../middleware/requireUser.js';
 import supabaseAdmin from '../lib/supabaseAdmin.js';
 import env from '../config/env.js';
+import { sendApiError } from '../lib/publicErrors.js';
 
 const router = Router();
 
@@ -25,7 +26,7 @@ router.get('/', requireUser, async (req, res, next) => {
       .maybeSingle();
 
     if (fetchError) {
-      return res.status(500).json({ error: 'Unable to load profile' });
+      return sendApiError(res, 500, 'INTERNAL_ERROR');
     }
 
     if (!existingProfile) {
@@ -48,7 +49,7 @@ router.get('/', requireUser, async (req, res, next) => {
         .single();
 
       if (insertError) {
-        return res.status(500).json({ error: 'Unable to create profile' });
+        return sendApiError(res, 500, 'INTERNAL_ERROR');
       }
 
       return res.json(createdProfile);
@@ -71,13 +72,13 @@ router.post('/consent', requireUser, async (req, res, next) => {
       body.privacyAccepted ?? body.privacy_accepted ?? body.privacy ?? undefined;
 
     if (termsAccepted === false || privacyAccepted === false) {
-      return res.status(400).json({ error: 'Consent cannot be revoked' });
+      return sendApiError(res, 400, 'INVALID_REQUEST');
     }
 
     const shouldUpdateTerms = termsAccepted === true;
     const shouldUpdatePrivacy = privacyAccepted === true;
     if (!shouldUpdateTerms && !shouldUpdatePrivacy) {
-      return res.status(400).json({ error: 'No consent updates provided' });
+      return sendApiError(res, 400, 'INVALID_REQUEST');
     }
 
     const now = new Date().toISOString();
@@ -103,7 +104,7 @@ router.post('/consent', requireUser, async (req, res, next) => {
       .maybeSingle();
 
     if (updateError) {
-      return res.status(500).json({ error: 'Unable to update consent' });
+      return sendApiError(res, 500, 'INTERNAL_ERROR');
     }
 
     if (updated) return res.json(updated);
@@ -128,7 +129,7 @@ router.post('/consent', requireUser, async (req, res, next) => {
       .single();
 
     if (insertError) {
-      return res.status(500).json({ error: 'Unable to create profile' });
+      return sendApiError(res, 500, 'INTERNAL_ERROR');
     }
 
     return res.json(created);

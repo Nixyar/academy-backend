@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import requireUser from '../middleware/requireUser.js';
 import supabaseAdmin from '../lib/supabaseAdmin.js';
+import { sendApiError } from '../lib/publicErrors.js';
 
 const router = Router();
 
@@ -21,7 +22,7 @@ router.get('/courses', requireUser, async (req, res, next) => {
       .eq('user_id', user.id);
 
     if (error) {
-      return res.status(500).json({ error: 'FAILED_TO_FETCH_PURCHASES' });
+      return sendApiError(res, 500, 'INTERNAL_ERROR');
     }
 
     const purchasedCourseIds = (data || [])
@@ -36,4 +37,3 @@ router.get('/courses', requireUser, async (req, res, next) => {
 });
 
 export default router;
-
