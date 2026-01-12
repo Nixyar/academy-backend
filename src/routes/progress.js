@@ -13,6 +13,51 @@ import requireUser from '../middleware/requireUser.js';
 
 const router = Router();
 
+const PROGRESS_LIST_CACHE_TTL_MS = 2500;
+const progressListCache = new Map(); // key -> { expiresAt, value }
+
+const stripLessonHeavyFields = (lesson) => {
+  if (!lesson || typeof lesson !== 'object' || Array.isArray(lesson)) return lesson;
+  const { result, result_html, ...rest } = lesson;
+  return rest;
+};
+
+// `/api/progress` is used for listing; avoid returning heavy workspace HTML/files.
+const stripProgressForList = (progress) => {
+  const normalized = normalizeProgress(progress);
+  const next = { ...normalized };
+
+  if (next.result && typeof next.result === 'object' && !Array.isArray(next.result)) {
+    const meta =
+      next.result.meta && typeof next.result.meta === 'object' && !Array.isArray(next.result.meta)
+        ? next.result.meta
+        : {};
+    const active_file =
+      typeof next.result.active_file === 'string' && next.result.active_file.trim()
+        ? next.result.active_file
+        : undefined;
+
+    next.result = {
+      meta,
+      ...(active_file ? { active_file } : {}),
+    };
+  }
+
+  // Legacy heavy fields
+  if ('result_html' in next) delete next.result_html;
+
+  const lessonsRaw = next.lessons && typeof next.lessons === 'object' && !Array.isArray(next.lessons)
+    ? next.lessons
+    : {};
+  const strippedLessons = {};
+  Object.entries(lessonsRaw).forEach(([lessonId, value]) => {
+    strippedLessons[lessonId] = stripLessonHeavyFields(value);
+  });
+  next.lessons = strippedLessons;
+
+  return next;
+};
+
 const getHeartbeatMs = (activeJob, fallbackUpdatedAt) => {
   const raw = activeJob?.updatedAt || activeJob?.startedAt || fallbackUpdatedAt;
   const parsed = raw ? Date.parse(raw) : NaN;
@@ -450,6 +495,17 @@ router.get('/progress', requireUser, async (req, res, next) => {
       return res.status(400).json({ error: 'courseIds query param is required' });
     }
 
+    const cacheKey = `${user.id}:${[...courseIds].sort().join(',')}`;
+    const cached = progressListCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return res.json(cached.value);
+    }
+
+    // Debug: track long /progress queries (remove after confirming root cause).
+    // eslint-disable-next-line no-console
+    console.log(`[DEBUG] Fetching progress for user ${user.id} and courses ${courseIds.join(',')}`);
+
+    const startedAt = Date.now();
     const { data, error } = await supabaseAdmin
       .from('user_course_progress')
       .select('course_id, progress')
@@ -467,10 +523,19 @@ router.get('/progress', requireUser, async (req, res, next) => {
     });
 
     (data || []).forEach((row) => {
-      progressMap[row.course_id] = normalizeProgress(row.progress);
+      progressMap[row.course_id] = stripProgressForList(row.progress);
     });
 
-    return res.json({ progress: progressMap });
+    const payload = { progress: progressMap };
+    progressListCache.set(cacheKey, { expiresAt: Date.now() + PROGRESS_LIST_CACHE_TTL_MS, value: payload });
+
+    const elapsed = Date.now() - startedAt;
+    if (elapsed >= env.slowLogMs) {
+      // eslint-disable-next-line no-console
+      console.warn('[slow-progress-list]', { userId: user.id, courseCount: courseIds.length, ms: elapsed });
+    }
+
+    return res.json(payload);
   } catch (error) {
     return next(error);
   }
