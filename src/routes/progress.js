@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import env from '../config/env.js';
 import supabaseAdmin from '../lib/supabaseAdmin.js';
 import {
   ACTIVE_JOB_TTL_MS,
@@ -506,14 +507,42 @@ router.get('/progress', requireUser, async (req, res, next) => {
     console.log(`[DEBUG] Fetching progress for user ${user.id} and courses ${courseIds.join(',')}`);
 
     const startedAt = Date.now();
-    const { data, error } = await supabaseAdmin
-      .from('user_course_progress')
-      .select('course_id, progress')
-      .eq('user_id', user.id)
-      .in('course_id', courseIds);
+    // eslint-disable-next-line no-console
+    console.log(`[DEBUG] Calling Supabase for user: ${user.id}`);
 
-    if (error) {
-      return res.status(500).json({ error: 'FAILED_TO_FETCH_PROGRESS' });
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10_000);
+
+    let data;
+    try {
+      const result = await supabaseAdmin
+        .from('user_course_progress')
+        .select('course_id, progress')
+        .eq('user_id', user.id)
+        .in('course_id', courseIds)
+        .abortSignal(controller.signal);
+
+      data = result.data;
+      const { error } = result;
+      if (error) {
+        // eslint-disable-next-line no-console
+        console.error('[ERROR] Supabase returned error:', error);
+        return res.status(500).json({ error: 'FAILED_TO_FETCH_PROGRESS', details: error });
+      }
+
+      // eslint-disable-next-line no-console
+      console.log(`[DEBUG] Supabase responded in ${Date.now() - startedAt}ms`);
+    } catch (err) {
+      const isAbort =
+        err && typeof err === 'object' && ('name' in err ? err.name === 'AbortError' : false);
+      // eslint-disable-next-line no-console
+      console.error('[CRITICAL] Request failed:', err instanceof Error ? err.message : String(err));
+      return res.status(isAbort ? 504 : 500).json({
+        error: isAbort ? 'DATABASE_TIMEOUT' : 'DATABASE_ERROR',
+        message: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      clearTimeout(timeoutId);
     }
 
     const progressMap = {};
