@@ -34,6 +34,14 @@ const webOrigins = process.env.WEB_ORIGIN
   .map((origin) => origin.trim())
   .filter(Boolean);
 
+const parseBool = (value, fallback = false) => {
+  if (value === undefined || value === null) return fallback;
+  const normalized = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'y', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'n', 'off'].includes(normalized)) return false;
+  return fallback;
+};
+
 const env = {
   port,
   webOrigins,
@@ -57,6 +65,11 @@ const env = {
   tbankSuccessUrl: String(process.env.TBANK_SUCCESS_URL || '').trim() || null,
   tbankFailUrl: String(process.env.TBANK_FAIL_URL || '').trim() || null,
   tbankNotificationUrl: String(process.env.TBANK_NOTIFICATION_URL || '').trim() || null,
+  tbankSendReceipt: parseBool(process.env.TBANK_SEND_RECEIPT, false),
+  tbankReceiptTaxation: String(process.env.TBANK_RECEIPT_TAXATION || '').trim() || null,
+  tbankReceiptTax: String(process.env.TBANK_RECEIPT_TAX || '').trim() || null,
+  tbankReceiptPaymentMethod: String(process.env.TBANK_RECEIPT_PAYMENT_METHOD || '').trim() || null,
+  tbankReceiptPaymentObject: String(process.env.TBANK_RECEIPT_PAYMENT_OBJECT || '').trim() || null,
 };
 
 export default env;

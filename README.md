@@ -33,6 +33,11 @@ Production-ready Express API for Supabase Auth session handling, Google OAuth vi
 | `TBANK_SUCCESS_URL` | Optional override for SuccessURL redirect. |
 | `TBANK_FAIL_URL` | Optional override for FailURL redirect. |
 | `TBANK_NOTIFICATION_URL` | Optional notification webhook URL for `/api/payments/tbank/notification`. |
+| `TBANK_SEND_RECEIPT` | `true/false`: include `Receipt` in `/Init` (fiscal check). |
+| `TBANK_RECEIPT_TAXATION` | Required when `TBANK_SEND_RECEIPT=true` (Taxation). |
+| `TBANK_RECEIPT_TAX` | Required when `TBANK_SEND_RECEIPT=true` (Tax for the item). |
+| `TBANK_RECEIPT_PAYMENT_METHOD` | Optional Receipt item `PaymentMethod`. |
+| `TBANK_RECEIPT_PAYMENT_OBJECT` | Optional Receipt item `PaymentObject`. |
 
 Copy `.env.example` to `.env` and fill values for local runs:
 ```bash

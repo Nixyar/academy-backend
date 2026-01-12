@@ -45,6 +45,39 @@ const isLikelyPaidTbankStatus = (status) => {
   return ['confirmed', 'paid'].includes(normalized);
 };
 
+const buildReceipt = ({ userEmail, courseTitle, amountKopeks }) => {
+  if (!env.tbankSendReceipt) return null;
+
+  const email = String(userEmail || '').trim();
+  if (!email) {
+    throw Object.assign(new Error('RECEIPT_EMAIL_REQUIRED'), { status: 400 });
+  }
+
+  const taxation = String(env.tbankReceiptTaxation || '').trim();
+  const tax = String(env.tbankReceiptTax || '').trim();
+
+  if (!taxation || !tax) {
+    // Receipt was requested but not configured.
+    throw Object.assign(new Error('RECEIPT_NOT_CONFIGURED'), { status: 503 });
+  }
+
+  const item = {
+    Name: String(courseTitle || 'Покупка курса').trim() || 'Покупка курса',
+    Price: amountKopeks,
+    Quantity: 1,
+    Amount: amountKopeks,
+    Tax: tax,
+    ...(env.tbankReceiptPaymentMethod ? { PaymentMethod: env.tbankReceiptPaymentMethod } : {}),
+    ...(env.tbankReceiptPaymentObject ? { PaymentObject: env.tbankReceiptPaymentObject } : {}),
+  };
+
+  return {
+    Email: email,
+    Taxation: taxation,
+    Items: [item],
+  };
+};
+
 router.post('/tbank/init', requireUser, async (req, res, next) => {
   try {
     if (!isConfigured()) {
@@ -119,6 +152,28 @@ router.post('/tbank/init', requireUser, async (req, res, next) => {
       ...(failUrl ? { FailURL: failUrl } : {}),
       ...(env.tbankNotificationUrl ? { NotificationURL: env.tbankNotificationUrl } : {}),
     };
+
+    let receipt = null;
+    try {
+      receipt = buildReceipt({ userEmail: user.email, courseTitle: course.title, amountKopeks });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message === 'RECEIPT_NOT_CONFIGURED') {
+        console.warn('[tbank-receipt-not-configured]', {
+          hasTaxation: Boolean(env.tbankReceiptTaxation),
+          hasTax: Boolean(env.tbankReceiptTax),
+        });
+        return sendApiError(res, 503, 'PAYMENTS_NOT_CONFIGURED');
+      }
+      if (message === 'RECEIPT_EMAIL_REQUIRED') {
+        return sendApiError(res, 400, 'INVALID_REQUEST');
+      }
+      throw err;
+    }
+
+    if (receipt) {
+      initPayload.Receipt = receipt;
+    }
 
     const Token = createTbankToken(initPayload, env.tbankPassword);
     const body = { ...initPayload, Token };
