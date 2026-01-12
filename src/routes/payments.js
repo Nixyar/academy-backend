@@ -20,6 +20,19 @@ const getApiUrl = (path) => {
   return `${base}${path.startsWith('/') ? path : `/${path}`}`;
 };
 
+const isConfigured = () => {
+  const apiUrl = String(env.tbankApiUrl || '').trim();
+  return Boolean(env.tbankTerminalKey && env.tbankPassword && apiUrl);
+};
+
+const readTbankJsonSafe = async (response) => {
+  try {
+    return await response.json();
+  } catch {
+    return null;
+  }
+};
+
 const normalizeStatus = (status) => String(status || '').trim().toLowerCase();
 
 const isPaidStatus = (status) => {
@@ -34,8 +47,8 @@ const isLikelyPaidTbankStatus = (status) => {
 
 router.post('/tbank/init', requireUser, async (req, res, next) => {
   try {
-    if (!env.tbankTerminalKey || !env.tbankPassword) {
-      return sendApiError(res, 500, 'INTERNAL_ERROR');
+    if (!isConfigured()) {
+      return sendApiError(res, 500, 'PAYMENTS_NOT_CONFIGURED');
     }
 
     const courseId = String(req.body?.courseId || '').trim();
@@ -91,9 +104,9 @@ router.post('/tbank/init', requireUser, async (req, res, next) => {
       Amount: amountKopeks,
       OrderId: orderId,
       Description: course.title ? `Покупка курса: ${course.title}` : 'Покупка курса',
-      SuccessURL: successUrl,
-      FailURL: failUrl,
-      NotificationURL: env.tbankNotificationUrl || null,
+      ...(successUrl ? { SuccessURL: successUrl } : {}),
+      ...(failUrl ? { FailURL: failUrl } : {}),
+      ...(env.tbankNotificationUrl ? { NotificationURL: env.tbankNotificationUrl } : {}),
     };
 
     const Token = createTbankToken(initPayload, env.tbankPassword);
@@ -110,10 +123,11 @@ router.post('/tbank/init', requireUser, async (req, res, next) => {
       logger: (event, data) => console.warn(`[${event}]`, data),
     });
 
-    const json = await response.json().catch(() => null);
+    const json = await readTbankJsonSafe(response);
     if (!response.ok || !json) {
       await supabaseAdmin.from('course_purchases').update({ status: 'failed' }).eq('id', created.id);
-      return sendApiError(res, 502, 'INTERNAL_ERROR');
+      console.error('[tbank-init-failed]', { status: response.status, statusText: response.statusText, body: json });
+      return sendApiError(res, 502, 'PAYMENT_PROVIDER_ERROR');
     }
 
     const paymentId = json.PaymentId || json.paymentId || null;
@@ -125,7 +139,8 @@ router.post('/tbank/init', requireUser, async (req, res, next) => {
         .from('course_purchases')
         .update({ status: String(json.Status || json.status || 'failed'), payment_id: paymentId })
         .eq('id', created.id);
-      return sendApiError(res, 400, 'INVALID_REQUEST');
+      console.error('[tbank-init-rejected]', { body: json });
+      return sendApiError(res, 502, 'PAYMENT_PROVIDER_ERROR');
     }
 
     await supabaseAdmin
@@ -142,7 +157,7 @@ router.post('/tbank/init', requireUser, async (req, res, next) => {
 router.post('/tbank/notification', async (req, res, next) => {
   try {
     if (!env.tbankTerminalKey || !env.tbankPassword) {
-      return sendApiError(res, 500, 'INTERNAL_ERROR');
+      return sendApiError(res, 500, 'PAYMENTS_NOT_CONFIGURED');
     }
 
     const payload = req.body && typeof req.body === 'object' ? req.body : {};
@@ -180,8 +195,8 @@ router.post('/tbank/notification', async (req, res, next) => {
 
 router.post('/tbank/sync', requireUser, async (req, res, next) => {
   try {
-    if (!env.tbankTerminalKey || !env.tbankPassword) {
-      return sendApiError(res, 500, 'INTERNAL_ERROR');
+    if (!isConfigured()) {
+      return sendApiError(res, 500, 'PAYMENTS_NOT_CONFIGURED');
     }
 
     const orderId = String(req.body?.orderId || '').trim();
@@ -219,9 +234,10 @@ router.post('/tbank/sync', requireUser, async (req, res, next) => {
       logger: (event, data) => console.warn(`[${event}]`, data),
     });
 
-    const json = await response.json().catch(() => null);
+    const json = await readTbankJsonSafe(response);
     if (!response.ok || !json) {
-      return sendApiError(res, 502, 'INTERNAL_ERROR');
+      console.error('[tbank-get-state-failed]', { status: response.status, statusText: response.statusText, body: json });
+      return sendApiError(res, 502, 'PAYMENT_PROVIDER_ERROR');
     }
 
     const tbankStatusRaw = json.Status || json.status || purchase.status || 'unknown';
