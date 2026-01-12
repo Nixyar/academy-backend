@@ -2,8 +2,9 @@ import { jwtVerify } from 'jose';
 import env from '../config/env.js';
 
 const jwtSecret = new TextEncoder().encode(env.supabaseJwtSecret);
+const normalizeSupabaseUrl = (value) => String(value || '').trim().replace(/\/+$/, '');
 const verifyOptions = {
-  issuer: `${env.supabaseUrl}/auth/v1`,
+  issuer: `${normalizeSupabaseUrl(env.supabaseUrl)}/auth/v1`,
   audience: 'authenticated',
   algorithms: ['HS256'],
 };

@@ -173,8 +173,12 @@ const applyPatch = (progress, patch) => {
 
 router.get('/courses/:courseId/progress', requireUser, async (req, res, next) => {
   try {
-    const { courseId } = req.params;
+    const courseId = String(req.params?.courseId || '').trim();
     const { user } = req;
+
+    if (!courseId) {
+      return res.status(400).json({ error: 'courseId is required' });
+    }
 
     let { progress, updatedAt } = await loadCourseProgress(user.id, courseId);
 
@@ -203,7 +207,6 @@ router.get('/courses/:courseId/progress', requireUser, async (req, res, next) =>
 
     return res.json({
       courseId,
-      course_id: courseId,
       progress,
       updatedAt,
     });
@@ -218,9 +221,13 @@ router.get('/courses/:courseId/progress', requireUser, async (req, res, next) =>
 
 router.put('/courses/:courseId/progress', requireUser, async (req, res, next) => {
   try {
-    const { courseId } = req.params;
+    const courseId = String(req.params?.courseId || '').trim();
     const { user } = req;
     const bodyProgress = req.body?.progress ?? req.body;
+
+    if (!courseId) {
+      return res.status(400).json({ error: 'courseId is required' });
+    }
 
     if (!bodyProgress || typeof bodyProgress !== 'object' || Array.isArray(bodyProgress)) {
       return res.status(400).json({ error: 'INVALID_PROGRESS', details: 'progress must be an object' });
@@ -231,7 +238,6 @@ router.put('/courses/:courseId/progress', requireUser, async (req, res, next) =>
 
     return res.json({
       courseId,
-      course_id: courseId,
       progress: saved,
       updatedAt,
     });
@@ -246,10 +252,14 @@ router.put('/courses/:courseId/progress', requireUser, async (req, res, next) =>
 
 router.patch('/courses/:courseId/progress', requireUser, async (req, res, next) => {
   try {
-    const { courseId } = req.params;
+    const courseId = String(req.params?.courseId || '').trim();
     const { user } = req;
     const patch = req.body || {};
     const op = patch?.op;
+
+    if (!courseId) {
+      return res.status(400).json({ error: 'courseId is required' });
+    }
 
     if (!op) {
       return res.status(400).json({ error: 'INVALID_PATCH', details: 'op is required' });
@@ -281,7 +291,6 @@ router.patch('/courses/:courseId/progress', requireUser, async (req, res, next) 
 
       return res.json({
         courseId,
-        course_id: courseId,
         progress: saved,
         updatedAt,
       });
@@ -298,7 +307,6 @@ router.patch('/courses/:courseId/progress', requireUser, async (req, res, next) 
 
     return res.json({
       courseId,
-      course_id: courseId,
       progress: saved,
       updatedAt,
     });
@@ -317,8 +325,12 @@ router.patch('/courses/:courseId/progress', requireUser, async (req, res, next) 
 
 router.get('/courses/:courseId/resume', requireUser, async (req, res, next) => {
   try {
-    const { courseId } = req.params;
+    const courseId = String(req.params?.courseId || '').trim();
     const { user } = req;
+
+    if (!courseId) {
+      return res.status(400).json({ error: 'courseId is required' });
+    }
 
     const { progress } = await loadCourseProgress(user.id, courseId);
     const lessonsById = progress.lessons || {};
@@ -399,7 +411,6 @@ router.patch('/v1/progress/active-file', requireUser, async (req, res, next) => 
 
     return res.json({
       courseId,
-      course_id: courseId.trim(),
       progress: savedWorkspace,
       result: {
         files: savedWorkspace.result.files,
