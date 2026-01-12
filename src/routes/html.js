@@ -1502,28 +1502,31 @@ ${assembledSections.join('\n\n')}
     }
 
     const prompt = [
-      'ИНСТРУКЦИЯ:',
+      '### ИНСТРУКЦИЯ ПО РЕДАКТИРОВАНИЮ:',
       job.instruction,
       '',
-      'CURRENT_HTML_START',
+      '### ТЕКУЩЕЕ СОДЕРЖАНИЕ ФАЙЛА (' + targetFile + '):',
+      '```html',
       currentHtml,
-      'CURRENT_HTML_END',
+      '```',
       '',
-      'Верни полный обновлённый HTML документ.',
+      'ЗАДАЧА: Верни ПОЛНЫЙ обновлённый HTML документ. Не используй markdown блоки в ответе, только чистый HTML код.',
     ].join('\n');
 
-    const newHtml = await callLlm({
+    const rawNewHtml = await callLlm({
       system,
       prompt,
       temperature: 0.2,
       maxTokens: 8192,
     });
 
+    const newHtml = normalizeLlmHtml(rawNewHtml);
+
     emitStatus(job, 'validating', 'validating html', 0.6);
     if (!isValidHtmlDocument(newHtml)) {
       throw Object.assign(new Error('LLM_INVALID_HTML'), {
         status: 502,
-        details: stripFences(String(newHtml || '')).slice(0, 500),
+        details: stripFences(String(rawNewHtml || '')).slice(0, 500),
       });
     }
 
