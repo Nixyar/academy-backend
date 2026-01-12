@@ -55,6 +55,8 @@ const buildReceipt = ({ userEmail, courseTitle, amountKopeks }) => {
 
   const taxation = String(env.tbankReceiptTaxation || '').trim();
   const tax = String(env.tbankReceiptTax || '').trim();
+  const paymentMethod = String(env.tbankReceiptPaymentMethod || '').trim() || 'full_payment';
+  const paymentObject = String(env.tbankReceiptPaymentObject || '').trim() || 'service';
 
   if (!taxation || !tax) {
     // Receipt was requested but not configured.
@@ -67,8 +69,8 @@ const buildReceipt = ({ userEmail, courseTitle, amountKopeks }) => {
     Quantity: 1,
     Amount: amountKopeks,
     Tax: tax,
-    ...(env.tbankReceiptPaymentMethod ? { PaymentMethod: env.tbankReceiptPaymentMethod } : {}),
-    ...(env.tbankReceiptPaymentObject ? { PaymentObject: env.tbankReceiptPaymentObject } : {}),
+    PaymentMethod: paymentMethod,
+    PaymentObject: paymentObject,
   };
 
   return {
@@ -174,6 +176,20 @@ router.post('/tbank/init', requireUser, async (req, res, next) => {
     if (receipt) {
       initPayload.Receipt = receipt;
     }
+
+    console.info('[tbank-init]', {
+      orderId,
+      amountKopeks,
+      hasReceipt: Boolean(receipt),
+      receiptMeta: receipt
+        ? {
+          taxation: receipt.Taxation,
+          tax: receipt.Items?.[0]?.Tax,
+          paymentMethod: receipt.Items?.[0]?.PaymentMethod,
+          paymentObject: receipt.Items?.[0]?.PaymentObject,
+        }
+        : null,
+    });
 
     const Token = createTbankToken(initPayload, env.tbankPassword);
     const body = { ...initPayload, Token };
