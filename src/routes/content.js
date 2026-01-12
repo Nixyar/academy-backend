@@ -9,6 +9,10 @@ const LESSONS_CACHE_TTL_MS = 5000;
 const lessonsCache = new Map(); // key -> { expiresAt, data }
 const lessonsInFlight = new Map(); // key -> Promise<unknown[]>
 
+const COURSES_CACHE_TTL_MS = 5000;
+const coursesCache = new Map(); // key -> { expiresAt, data }
+const coursesInFlight = new Map(); // key -> Promise<unknown[]>
+
 const parseEq = (value) => {
   if (typeof value !== 'string') {
     return value;
@@ -19,34 +23,185 @@ const parseEq = (value) => {
 
 const normalizeParam = (value) => String(value || '').trim();
 
+const isMissingColumnError = (error, columnName) => {
+  const message = error && typeof error === 'object' && 'message' in error ? String(error.message) : '';
+  return (
+    message.includes(`column "${columnName}"`) ||
+    message.includes(`column '${columnName}'`) ||
+    message.includes(`column ${columnName}`)
+  );
+};
+
+const isPermissionError = (error) => {
+  const message = error && typeof error === 'object' && 'message' in error ? String(error.message) : '';
+  const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
+  return code === '42501' || /permission denied|not authorized|JWT/i.test(message);
+};
+
+const isTimeoutError = (error) => {
+  const message = error && typeof error === 'object' && 'message' in error ? String(error.message) : '';
+  return /aborted|timeout/i.test(message);
+};
+
+const isTransientSupabaseError = (error) => {
+  const message = error && typeof error === 'object' && 'message' in error ? String(error.message) : '';
+  const status = error && typeof error === 'object' && 'status' in error ? Number(error.status) : null;
+  const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
+
+  if (status && [500, 502, 503, 504].includes(status)) return true;
+  if (/schema cache|connection|ECONNRESET|ENOTFOUND|EAI_AGAIN/i.test(message)) return true;
+  if (/PGRST/i.test(code)) return true;
+  return false;
+};
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 router.get('/courses', async (req, res, next) => {
   try {
     const { status, slug, access } = req.query || {};
 
-    let query = supabaseAnon
-      .from('courses')
-      .select('id,slug,title,description,cover_url,access,status,label,labels,sort_order,price,sale_price,currency')
-      .order('sort_order', { ascending: true });
+    const primarySelect =
+      'id,slug,title,description,cover_url,access,status,label,labels,sort_order,price,sale_price,currency';
+    const fallbackSelect =
+      'id,slug,title,description,cover_url,access,status,sort_order,price';
+    const minimalSelect = 'id,slug,title,description,cover_url,access,status';
 
-    if (status) {
-      query = query.eq('status', parseEq(status));
+    const normalizedStatus = status ? normalizeParam(parseEq(status)) : '';
+    const normalizedSlug = slug ? normalizeParam(parseEq(slug)) : '';
+    const normalizedAccess = access ? normalizeParam(parseEq(access)) : '';
+    const cacheKey = `${normalizedStatus}|${normalizedSlug}|${normalizedAccess}`;
+
+    const cached = coursesCache.get(cacheKey);
+    if (cached) {
+      if (cached.expiresAt > Date.now()) {
+        return res.json(cached.data);
+      }
+      coursesCache.delete(cacheKey);
     }
 
-    if (slug) {
-      query = query.eq('slug', parseEq(slug));
+    const inflight = coursesInFlight.get(cacheKey);
+    if (inflight) {
+      const data = await inflight;
+      return res.json(data);
     }
 
-    if (access) {
-      query = query.eq('access', parseEq(access));
+    const buildQuery = (selectFields, opts = {}) => {
+      let query = supabaseAnon
+        .from('courses')
+        .select(selectFields)
+        .order(opts.orderBy || 'sort_order', { ascending: true });
+
+      if (status) {
+        query = query.eq('status', parseEq(status));
+      }
+
+      if (slug) {
+        query = query.eq('slug', parseEq(slug));
+      }
+
+      if (access) {
+        query = query.eq('access', parseEq(access));
+      }
+
+      return query;
+    };
+
+    const startedAt = Date.now();
+    const promise = (async () => {
+      // 1) Try full select ordered by sort_order
+      let result = await buildQuery(primarySelect);
+      if (result.error && isTransientSupabaseError(result.error)) {
+        await sleep(150);
+        result = await buildQuery(primarySelect);
+      }
+
+      // If sort_order doesn't exist, retry with stable order (title)
+      if (result.error && isMissingColumnError(result.error, 'sort_order')) {
+        // eslint-disable-next-line no-console
+        console.warn('[courses-order-fallback]', { message: result.error.message });
+        result = await buildQuery(primarySelect, { orderBy: 'title' });
+      }
+      if (result.error && isTransientSupabaseError(result.error)) {
+        await sleep(150);
+        result = await buildQuery(primarySelect, { orderBy: 'title' });
+      }
+
+      // If optional columns don't exist, retry with smaller selects.
+      if (result.error) {
+        // eslint-disable-next-line no-console
+        console.warn('[courses-select-fallback]', { message: result.error.message });
+        result = await buildQuery(fallbackSelect);
+      }
+      if (result.error && isTransientSupabaseError(result.error)) {
+        await sleep(150);
+        result = await buildQuery(fallbackSelect);
+      }
+
+      if (result.error && isMissingColumnError(result.error, 'sort_order')) {
+        // eslint-disable-next-line no-console
+        console.warn('[courses-order-fallback]', { message: result.error.message });
+        result = await buildQuery(fallbackSelect, { orderBy: 'title' });
+      }
+      if (result.error && isTransientSupabaseError(result.error)) {
+        await sleep(150);
+        result = await buildQuery(fallbackSelect, { orderBy: 'title' });
+      }
+
+      if (result.error) {
+        // eslint-disable-next-line no-console
+        console.warn('[courses-select-fallback-min]', { message: result.error.message });
+        result = await buildQuery(minimalSelect, { orderBy: 'title' });
+      }
+      if (result.error && isTransientSupabaseError(result.error)) {
+        await sleep(150);
+        result = await buildQuery(minimalSelect, { orderBy: 'title' });
+      }
+
+      if (result.error) {
+        const statusCode = isPermissionError(result.error) ? 403 : (isTimeoutError(result.error) ? 504 : 500);
+        const code = isPermissionError(result.error)
+          ? 'FORBIDDEN'
+          : (isTimeoutError(result.error) ? 'DATABASE_TIMEOUT' : 'FAILED_TO_FETCH_COURSES');
+        throw Object.assign(new Error(code), { status: statusCode, details: result.error });
+      }
+
+      return result.data || [];
+    })();
+
+    coursesInFlight.set(cacheKey, promise);
+
+    try {
+      const data = await promise;
+      coursesCache.set(cacheKey, { expiresAt: Date.now() + COURSES_CACHE_TTL_MS, data });
+
+      const elapsed = Date.now() - startedAt;
+      if (elapsed >= env.slowLogMs) {
+        // eslint-disable-next-line no-console
+        console.warn('[slow-courses]', {
+          status: normalizedStatus || null,
+          slug: normalizedSlug || null,
+          access: normalizedAccess || null,
+          ms: elapsed,
+        });
+      }
+
+      return res.json(data);
+    } catch (err) {
+      const code = err && typeof err === 'object' && 'message' in err ? String(err.message) : 'FAILED_TO_FETCH_COURSES';
+      const statusCode = err && typeof err === 'object' && 'status' in err ? Number(err.status) : 500;
+      // eslint-disable-next-line no-console
+      console.error('[courses-error]', { status: statusCode, error: code });
+      return sendApiError(
+        res,
+        Number.isFinite(statusCode) ? statusCode : 500,
+        code === 'FORBIDDEN' || code === 'DATABASE_TIMEOUT' || code === 'FAILED_TO_FETCH_COURSES'
+          ? code
+          : 'FAILED_TO_FETCH_COURSES',
+        { details: err && typeof err === 'object' && 'details' in err ? err.details : undefined },
+      );
+    } finally {
+      coursesInFlight.delete(cacheKey);
     }
-
-    const { data, error } = await query;
-
-    if (error) {
-      return sendApiError(res, 500, 'FAILED_TO_FETCH_COURSES', { details: error });
-    }
-
-    return res.json(data);
   } catch (error) {
     return next(error);
   }
@@ -58,21 +213,30 @@ router.get('/lessons', async (req, res, next) => {
 
     // Use selective fields to avoid fetching heavy LLM prompts for the whole list.
     // We include 'blocks' as they are required for rendering the lesson content.
-    const selectFields =
+    const selectPrimary =
       'id,course_id,slug,title,lesson_type,sort_order,lesson_type_ru,blocks,unlock_rule,settings,mode,settings_mode';
-    let query = supabaseAnon.from('lessons').select(selectFields).order('sort_order', { ascending: true });
+    const selectFallback =
+      'id,course_id,slug,title,lesson_type,sort_order,lesson_type_ru,blocks,settings';
 
-    if (courseId) {
-      query = query.eq('course_id', parseEq(courseId));
-    }
+    const buildQuery = (selectFields) => {
+      let query = supabaseAnon.from('lessons').select(selectFields).order('sort_order', { ascending: true });
 
-    if (slug) {
-      query = query.eq('slug', parseEq(slug));
-    }
+      if (courseId) {
+        query = query.eq('course_id', parseEq(courseId));
+      }
 
-    if (lessonType) {
-      query = query.eq('lesson_type', parseEq(lessonType));
-    }
+      if (slug) {
+        query = query.eq('slug', parseEq(slug));
+      }
+
+      if (lessonType) {
+        query = query.eq('lesson_type', parseEq(lessonType));
+      }
+
+      return query;
+    };
+
+    let query = buildQuery(selectPrimary);
 
     const normalizedCourseId = courseId ? normalizeParam(parseEq(courseId)) : '';
     const normalizedSlug = slug ? normalizeParam(parseEq(slug)) : '';
@@ -96,11 +260,19 @@ router.get('/lessons', async (req, res, next) => {
     const startedAt = Date.now();
     const promise = (async () => {
       // supabaseAnon already handles timeouts via fetch decoration
-      const { data, error } = await query;
-      if (error) {
-        throw Object.assign(new Error('FAILED_TO_FETCH_LESSONS'), { status: 500, details: error });
+      let result = await query;
+      if (result.error) {
+        // Back-compat: some deployments may not have optional fields yet.
+        // eslint-disable-next-line no-console
+        console.warn('[lessons-select-fallback]', { message: result.error.message });
+        result = await buildQuery(selectFallback);
       }
-      return data || [];
+
+      if (result.error) {
+        throw Object.assign(new Error('FAILED_TO_FETCH_LESSONS'), { status: 500, details: result.error });
+      }
+
+      return result.data || [];
     })();
 
     lessonsInFlight.set(cacheKey, promise);
