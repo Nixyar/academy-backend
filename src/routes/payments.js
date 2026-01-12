@@ -48,7 +48,13 @@ const isLikelyPaidTbankStatus = (status) => {
 router.post('/tbank/init', requireUser, async (req, res, next) => {
   try {
     if (!isConfigured()) {
-      return sendApiError(res, 500, 'PAYMENTS_NOT_CONFIGURED');
+      return sendApiError(res, 503, 'PAYMENTS_NOT_CONFIGURED', {
+        details: {
+          hasTerminalKey: Boolean(env.tbankTerminalKey),
+          hasPassword: Boolean(env.tbankPassword),
+          hasApiUrl: Boolean(String(env.tbankApiUrl || '').trim()),
+        },
+      });
     }
 
     const courseId = String(req.body?.courseId || '').trim();
@@ -157,7 +163,12 @@ router.post('/tbank/init', requireUser, async (req, res, next) => {
 router.post('/tbank/notification', async (req, res, next) => {
   try {
     if (!env.tbankTerminalKey || !env.tbankPassword) {
-      return sendApiError(res, 500, 'PAYMENTS_NOT_CONFIGURED');
+      return sendApiError(res, 503, 'PAYMENTS_NOT_CONFIGURED', {
+        details: {
+          hasTerminalKey: Boolean(env.tbankTerminalKey),
+          hasPassword: Boolean(env.tbankPassword),
+        },
+      });
     }
 
     const payload = req.body && typeof req.body === 'object' ? req.body : {};
@@ -196,7 +207,13 @@ router.post('/tbank/notification', async (req, res, next) => {
 router.post('/tbank/sync', requireUser, async (req, res, next) => {
   try {
     if (!isConfigured()) {
-      return sendApiError(res, 500, 'PAYMENTS_NOT_CONFIGURED');
+      return sendApiError(res, 503, 'PAYMENTS_NOT_CONFIGURED', {
+        details: {
+          hasTerminalKey: Boolean(env.tbankTerminalKey),
+          hasPassword: Boolean(env.tbankPassword),
+          hasApiUrl: Boolean(String(env.tbankApiUrl || '').trim()),
+        },
+      });
     }
 
     const orderId = String(req.body?.orderId || '').trim();

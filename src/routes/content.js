@@ -62,9 +62,12 @@ router.get('/courses', async (req, res, next) => {
 
     const primarySelect =
       'id,slug,title,description,cover_url,access,status,label,labels,sort_order,price,sale_price,currency';
+    const noLabelSelect =
+      'id,slug,title,description,cover_url,access,status,labels,sort_order,price,sale_price,currency';
     const fallbackSelect =
-      'id,slug,title,description,cover_url,access,status,sort_order,price';
-    const minimalSelect = 'id,slug,title,description,cover_url,access,status';
+      'id,slug,title,description,cover_url,access,status,sort_order,price,sale_price,currency';
+    const minimalSelect =
+      'id,slug,title,description,cover_url,access,status,price';
 
     const normalizedStatus = status ? normalizeParam(parseEq(status)) : '';
     const normalizedSlug = slug ? normalizeParam(parseEq(slug)) : '';
@@ -126,10 +129,31 @@ router.get('/courses', async (req, res, next) => {
         result = await buildQuery(primarySelect, { orderBy: 'title' });
       }
 
-      // If optional columns don't exist, retry with smaller selects.
+      // Back-compat: if legacy `label` column doesn't exist, drop it first
+      if (result.error && isMissingColumnError(result.error, 'label')) {
+        // eslint-disable-next-line no-console
+        console.warn('[courses-select-fallback]', { stage: 'drop-label', message: result.error.message });
+        result = await buildQuery(noLabelSelect);
+        if (result.error && isTransientSupabaseError(result.error)) {
+          await sleep(150);
+          result = await buildQuery(noLabelSelect);
+        }
+
+        if (result.error && isMissingColumnError(result.error, 'sort_order')) {
+          // eslint-disable-next-line no-console
+          console.warn('[courses-order-fallback]', { stage: 'drop-label', message: result.error.message });
+          result = await buildQuery(noLabelSelect, { orderBy: 'title' });
+          if (result.error && isTransientSupabaseError(result.error)) {
+            await sleep(150);
+            result = await buildQuery(noLabelSelect, { orderBy: 'title' });
+          }
+        }
+      }
+
+      // If optional columns still don't exist, retry with smaller selects.
       if (result.error) {
         // eslint-disable-next-line no-console
-        console.warn('[courses-select-fallback]', { message: result.error.message });
+        console.warn('[courses-select-fallback]', { stage: 'fallback', message: result.error.message });
         result = await buildQuery(fallbackSelect);
       }
       if (result.error && isTransientSupabaseError(result.error)) {
@@ -139,7 +163,7 @@ router.get('/courses', async (req, res, next) => {
 
       if (result.error && isMissingColumnError(result.error, 'sort_order')) {
         // eslint-disable-next-line no-console
-        console.warn('[courses-order-fallback]', { message: result.error.message });
+        console.warn('[courses-order-fallback]', { stage: 'fallback', message: result.error.message });
         result = await buildQuery(fallbackSelect, { orderBy: 'title' });
       }
       if (result.error && isTransientSupabaseError(result.error)) {

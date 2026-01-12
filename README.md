@@ -27,6 +27,12 @@ Production-ready Express API for Supabase Auth session handling, Google OAuth vi
 | `LLM_API_URL` | Full URL for LLM generation endpoint (defaults to `http://95.81.99.208/v1/llm/generate`). |
 | `COOKIE_SECURE` | `true` to send cookies with `Secure` (set to `false` for local HTTP). |
 | `NODE_ENV` | `development` or `production`. |
+| `TBANK_TERMINAL_KEY` | TBank TerminalKey (for `/api/payments/tbank/*`). |
+| `TBANK_PASSWORD` | TBank password (used to compute request Token). |
+| `TBANK_API_URL` | Base URL for TBank API (e.g. `https://.../v2`). |
+| `TBANK_SUCCESS_URL` | Optional override for SuccessURL redirect. |
+| `TBANK_FAIL_URL` | Optional override for FailURL redirect. |
+| `TBANK_NOTIFICATION_URL` | Optional notification webhook URL for `/api/payments/tbank/notification`. |
 
 Copy `.env.example` to `.env` and fill values for local runs:
 ```bash
