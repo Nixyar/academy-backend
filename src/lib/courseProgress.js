@@ -3,6 +3,40 @@ import supabaseAdmin from './supabaseAdmin.js';
 export const ACTIVE_JOB_STATUSES = new Set(['queued', 'running']);
 export const ACTIVE_JOB_TTL_MS = 5 * 60 * 1000;
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const isRetryableSupabaseMessage = (message) => {
+  const msg = String(message || '').toLowerCase();
+  if (!msg) return false;
+  return (
+    msg.includes('terminated') ||
+    msg.includes('fetch failed') ||
+    msg.includes('networkerror') ||
+    msg.includes('econnreset') ||
+    msg.includes('econnrefused') ||
+    msg.includes('etimedout') ||
+    msg.includes('socket') ||
+    msg.includes('timeout') ||
+    msg.includes('service unavailable') ||
+    msg.includes('bad gateway') ||
+    msg.includes('gateway timeout')
+  );
+};
+
+const toSupabaseErrorDetails = (error) => {
+  if (!error) return null;
+  if (typeof error === 'string') return { message: error };
+  if (typeof error !== 'object') return { message: String(error) };
+
+  const details = {};
+  if ('message' in error) details.message = String(error.message || '');
+  if ('code' in error && error.code != null) details.code = String(error.code);
+  if ('details' in error && error.details != null) details.details = String(error.details);
+  if ('hint' in error && error.hint != null) details.hint = String(error.hint);
+
+  return Object.keys(details).length ? details : { message: String(error) };
+};
+
 const normalizeActiveJob = (activeJob) => {
   if (!activeJob || typeof activeJob !== 'object' || Array.isArray(activeJob)) {
     return null;
@@ -86,23 +120,35 @@ export const normalizeProgress = (progress) => {
 export const isActiveJobRunning = (job) => !!job && ACTIVE_JOB_STATUSES.has(job.status);
 
 export const loadCourseProgress = async (userId, courseId) => {
-  const { data, error } = await supabaseAdmin
-    .from('user_course_progress')
-    .select('progress, updated_at')
-    .eq('user_id', userId)
-    .eq('course_id', courseId)
-    .maybeSingle();
+  let lastError;
 
-  if (error) {
-    const err = new Error('FAILED_TO_FETCH_PROGRESS');
-    err.details = error.message;
-    throw err;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const { data, error } = await supabaseAdmin
+      .from('user_course_progress')
+      .select('progress, updated_at')
+      .eq('user_id', userId)
+      .eq('course_id', courseId)
+      .maybeSingle();
+
+    if (!error) {
+      return {
+        progress: normalizeProgress(data?.progress),
+        updatedAt: data?.updated_at || null,
+      };
+    }
+
+    lastError = error;
+    if (attempt < 3 && isRetryableSupabaseMessage(error.message)) {
+      await sleep(250 * attempt + Math.floor(Math.random() * 200));
+      continue;
+    }
+    break;
   }
 
-  return {
-    progress: normalizeProgress(data?.progress),
-    updatedAt: data?.updated_at || null,
-  };
+  const err = new Error('FAILED_TO_FETCH_PROGRESS');
+  err.status = 500;
+  err.details = toSupabaseErrorDetails(lastError);
+  throw err;
 };
 
 export const saveCourseProgress = async (userId, courseId, progress) => {
@@ -113,22 +159,34 @@ export const saveCourseProgress = async (userId, courseId, progress) => {
     updated_at: new Date().toISOString(),
   };
 
-  const { data, error } = await supabaseAdmin
-    .from('user_course_progress')
-    .upsert([payload], { onConflict: 'user_id,course_id' })
-    .select('progress, updated_at')
-    .single();
+  let lastError;
 
-  if (error) {
-    const err = new Error('FAILED_TO_SAVE_PROGRESS');
-    err.details = error.message;
-    throw err;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const { data, error } = await supabaseAdmin
+      .from('user_course_progress')
+      .upsert([payload], { onConflict: 'user_id,course_id' })
+      .select('progress, updated_at')
+      .single();
+
+    if (!error) {
+      return {
+        progress: normalizeProgress(data?.progress || progress || {}),
+        updatedAt: data?.updated_at || payload.updated_at,
+      };
+    }
+
+    lastError = error;
+    if (attempt < 3 && isRetryableSupabaseMessage(error.message)) {
+      await sleep(300 * attempt + Math.floor(Math.random() * 200));
+      continue;
+    }
+    break;
   }
 
-  return {
-    progress: normalizeProgress(data?.progress || progress || {}),
-    updatedAt: data?.updated_at || payload.updated_at,
-  };
+  const err = new Error('FAILED_TO_SAVE_PROGRESS');
+  err.status = 500;
+  err.details = toSupabaseErrorDetails(lastError);
+  throw err;
 };
 
 export const mutateCourseProgress = async (userId, courseId, mutator) => {

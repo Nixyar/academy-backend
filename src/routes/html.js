@@ -1180,6 +1180,17 @@ router.get('/stream', requireUser, async (req, res, next) => {
     const safeDetails = normalizeErrorDetails(err?.details) || normalizeErrorDetails(err?.message);
     job.status = 'error';
     job.error = { error: code, details: safeDetails || undefined };
+    // eslint-disable-next-line no-console
+    console.error('[html.stream] job failed', {
+      jobId: job.jobId,
+      mode: job.mode,
+      userId: job.userId,
+      courseId: job.courseId,
+      lessonId: job.lessonId,
+      error: code,
+      details: safeDetails || undefined,
+      stack: err?.stack ? String(err.stack).slice(0, 4000) : undefined,
+    });
     emitStatus(job, 'error', code);
     broadcastSse(job, 'error', job.error);
     try {
