@@ -2,6 +2,7 @@ import { createClient } from '@supabase/supabase-js';
 import { Router } from 'express';
 import env from '../config/env.js';
 import supabaseAdmin from '../lib/supabaseAdmin.js';
+import { createTimedFetch } from '../lib/fetchWithTimeout.js';
 
 const router = Router();
 
@@ -21,6 +22,13 @@ const supabaseAuth = createClient(env.supabaseUrl, env.supabaseAnonKey, {
   auth: {
     autoRefreshToken: false,
     persistSession: false,
+  },
+  global: {
+    fetch: createTimedFetch(env.supabaseTimeoutMs, {
+      name: 'supabase-auth',
+      slowMs: env.externalSlowLogMs,
+      logger: (event, data) => console.warn(`[${event}]`, data),
+    }),
   },
 });
 

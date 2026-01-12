@@ -3,6 +3,8 @@ import { randomUUID } from 'crypto';
 import env from '../config/env.js';
 import supabaseAdmin from '../lib/supabaseAdmin.js';
 import requireUser from '../middleware/requireUser.js';
+import { fetchWithTimeout } from '../lib/fetchWithTimeout.js';
+import { Semaphore } from '../lib/semaphore.js';
 import {
   ACTIVE_JOB_TTL_MS,
   isActiveJobRunning,
@@ -16,6 +18,7 @@ const router = Router();
 
 const JOB_TTL_MS = 20 * 60 * 1000;
 const jobs = new Map(); // Map<jobId, Job>
+const llmSemaphore = new Semaphore(env.llmMaxConcurrency);
 
 const parseLessonSettings = (lesson) => {
   const raw = lesson?.settings;
@@ -185,8 +188,8 @@ const normalizeLlmHtml = (raw) => {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const LLM_TIMEOUT_MS = 60_000;
-const LLM_ADD_PAGE_TIMEOUT_MS = 120_000;
+const LLM_TIMEOUT_MS = env.llmTimeoutMs;
+const LLM_ADD_PAGE_TIMEOUT_MS = Math.max(env.llmTimeoutMs, 30000);
 const LLM_RETRYABLE_STATUSES = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
 
 const isValidHtmlDocument = (html) => {
@@ -781,7 +784,7 @@ const callLlm = async ({ system, prompt, temperature, maxTokens, timeoutMs }) =>
 
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
-      const resp = await fetch(env.llmApiUrl, {
+      const resp = await llmSemaphore.run(() => fetchWithTimeout(env.llmApiUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -790,8 +793,12 @@ const callLlm = async ({ system, prompt, temperature, maxTokens, timeoutMs }) =>
           temperature,
           maxTokens,
         }),
-        signal: AbortSignal.timeout(timeout),
-      });
+      }, {
+        name: 'llm',
+        timeoutMs: timeout,
+        slowMs: env.externalSlowLogMs,
+        logger: (event, data) => console.warn(`[${event}]`, data),
+      }));
 
       if (!resp.ok) {
         const contentType = resp.headers.get('content-type') || '';

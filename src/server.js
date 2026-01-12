@@ -50,6 +50,22 @@ app.use((req, res, next) => corsMiddleware(req, res, (err) => {
 
   return next(err);
 }));
+
+app.use((req, res, next) => {
+  const startedAt = Date.now();
+  res.on('finish', () => {
+    const elapsed = Date.now() - startedAt;
+    if (elapsed < env.slowLogMs) return;
+    // eslint-disable-next-line no-console
+    console.warn('[slow-request]', {
+      method: req.method,
+      path: req.originalUrl || req.url,
+      status: res.statusCode,
+      ms: elapsed,
+    });
+  });
+  next();
+});
 app.use(express.json());
 app.use(cookieParser());
 

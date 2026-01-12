@@ -17,6 +17,8 @@ const isRetryableSupabaseMessage = (message) => {
     msg.includes('etimedout') ||
     msg.includes('socket') ||
     msg.includes('timeout') ||
+    msg.includes('aborted') ||
+    msg.includes('aborterror') ||
     msg.includes('service unavailable') ||
     msg.includes('bad gateway') ||
     msg.includes('gateway timeout')

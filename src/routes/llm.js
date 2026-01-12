@@ -1,8 +1,11 @@
 import { Router } from 'express';
 import env from '../config/env.js';
 import supabaseAdmin from '../lib/supabaseAdmin.js';
+import { fetchWithTimeout } from '../lib/fetchWithTimeout.js';
+import { Semaphore } from '../lib/semaphore.js';
 
 const router = Router();
+const llmSemaphore = new Semaphore(env.llmMaxConcurrency);
 
 const stripFences = (s) =>
   String(s || '')
@@ -111,7 +114,7 @@ If you need to create a new file, include it too.
     }
 
     // Plan request
-    const planResp = await fetch(env.llmApiUrl, {
+    const planResp = await llmSemaphore.run(() => fetchWithTimeout(env.llmApiUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -120,7 +123,12 @@ If you need to create a new file, include it too.
         temperature: 0.6,
         maxTokens: 4096,
       }),
-    });
+    }, {
+      name: 'llm-plan',
+      timeoutMs: env.llmTimeoutMs,
+      slowMs: env.externalSlowLogMs,
+      logger: (event, data) => console.warn(`[${event}]`, data),
+    }));
 
     if (!planResp.ok) {
       const errorText = await planResp.text().catch(() => null);
@@ -148,7 +156,7 @@ ${JSON.stringify(planObj)}
 
 ${multiFileInstruction}`;
 
-    const htmlResp = await fetch(env.llmApiUrl, {
+    const htmlResp = await llmSemaphore.run(() => fetchWithTimeout(env.llmApiUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -157,7 +165,12 @@ ${multiFileInstruction}`;
         temperature: 0.3,
         maxTokens: 8192,
       }),
-    });
+    }, {
+      name: 'llm-render',
+      timeoutMs: env.llmTimeoutMs,
+      slowMs: env.externalSlowLogMs,
+      logger: (event, data) => console.warn(`[${event}]`, data),
+    }));
 
     if (!htmlResp.ok) {
       const errorText = await htmlResp.text().catch(() => null);

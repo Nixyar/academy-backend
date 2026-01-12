@@ -4,6 +4,7 @@ import requireUser from '../middleware/requireUser.js';
 import supabaseAdmin from '../lib/supabaseAdmin.js';
 import env from '../config/env.js';
 import { createTbankToken } from '../lib/tbank.js';
+import { fetchWithTimeout } from '../lib/fetchWithTimeout.js';
 
 const router = Router();
 
@@ -97,10 +98,15 @@ router.post('/tbank/init', requireUser, async (req, res, next) => {
     const Token = createTbankToken(initPayload, env.tbankPassword);
     const body = { ...initPayload, Token };
 
-    const response = await fetch(getApiUrl('/Init'), {
+    const response = await fetchWithTimeout(getApiUrl('/Init'), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
+    }, {
+      name: 'tbank-init',
+      timeoutMs: env.tbankTimeoutMs,
+      slowMs: env.externalSlowLogMs,
+      logger: (event, data) => console.warn(`[${event}]`, data),
     });
 
     const json = await response.json().catch(() => null);
@@ -201,10 +207,15 @@ router.post('/tbank/sync', requireUser, async (req, res, next) => {
     };
     const Token = createTbankToken(statePayload, env.tbankPassword);
 
-    const response = await fetch(getApiUrl('/GetState'), {
+    const response = await fetchWithTimeout(getApiUrl('/GetState'), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ ...statePayload, Token }),
+    }, {
+      name: 'tbank-get-state',
+      timeoutMs: env.tbankTimeoutMs,
+      slowMs: env.externalSlowLogMs,
+      logger: (event, data) => console.warn(`[${event}]`, data),
     });
 
     const json = await response.json().catch(() => null);
