@@ -38,3 +38,11 @@ export const createTbankToken = (payload, password, mode = 'password_key') => {
   const concatenated = keys.map((key) => toTokenStringValue(withPassword[key])).join('');
   return sha256Hex(concatenated);
 };
+
+export const createTbankTokenExcluding = (payload, password, { excludeKeys = [], mode = 'password_key' } = {}) => {
+  const excluded = new Set(excludeKeys.map((key) => String(key)));
+  const filtered = Object.fromEntries(
+    Object.entries(payload || {}).filter(([key]) => !excluded.has(String(key))),
+  );
+  return createTbankToken(filtered, password, mode);
+};

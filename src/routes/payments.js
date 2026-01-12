@@ -3,7 +3,7 @@ import crypto from 'crypto';
 import requireUser from '../middleware/requireUser.js';
 import supabaseAdmin from '../lib/supabaseAdmin.js';
 import env from '../config/env.js';
-import { createTbankToken } from '../lib/tbank.js';
+import { createTbankTokenExcluding } from '../lib/tbank.js';
 import { fetchWithTimeout } from '../lib/fetchWithTimeout.js';
 import { sendApiError } from '../lib/publicErrors.js';
 
@@ -206,8 +206,10 @@ router.post('/tbank/init', requireUser, async (req, res, next) => {
         : null,
     });
 
-    const callInit = async (payload, tokenMode) => {
-      const Token = createTbankToken(payload, env.tbankPassword, tokenMode);
+    const callInit = async (payload, tokenMode, { excludeReceiptFromToken = false } = {}) => {
+      const Token = excludeReceiptFromToken
+        ? createTbankTokenExcluding(payload, env.tbankPassword, { excludeKeys: ['Receipt'], mode: tokenMode })
+        : createTbankTokenExcluding(payload, env.tbankPassword, { mode: tokenMode });
       const body = { ...payload, Token };
       const response = await fetchWithTimeout(getApiUrl('/Init'), {
         method: 'POST',
@@ -220,11 +222,22 @@ router.post('/tbank/init', requireUser, async (req, res, next) => {
         logger: (event, data) => console.warn(`[${event}]`, data),
       });
       const parsed = await readTbankJsonSafe(response);
-      return { response, ...parsed, tokenMode };
+      return { response, ...parsed, tokenMode, excludeReceiptFromToken };
     };
 
     const tokenModes = ['password_key', 'append_password', 'key_value'];
-    let initAttempt = await callInit(initPayload, tokenModes[0]);
+    const tokenVariants = receipt
+      ? [
+        { mode: tokenModes[0], excludeReceiptFromToken: true }, // most likely for DEMO receipts
+        { mode: tokenModes[0], excludeReceiptFromToken: false },
+        ...tokenModes.slice(1).flatMap((mode) => ([
+          { mode, excludeReceiptFromToken: true },
+          { mode, excludeReceiptFromToken: false },
+        ])),
+      ]
+      : tokenModes.map((mode) => ({ mode, excludeReceiptFromToken: false }));
+
+    let initAttempt = await callInit(initPayload, tokenVariants[0].mode, { excludeReceiptFromToken: tokenVariants[0].excludeReceiptFromToken });
     if (!initAttempt.response.ok || !initAttempt.json) {
       await supabaseAdmin.from('course_purchases').update({ status: 'failed' }).eq('id', created.id);
       console.error('[tbank-init-failed]', {
@@ -233,15 +246,20 @@ router.post('/tbank/init', requireUser, async (req, res, next) => {
         body: initAttempt.json,
         bodyText: initAttempt.text || null,
         tokenMode: initAttempt.tokenMode,
+        excludeReceiptFromToken: initAttempt.excludeReceiptFromToken,
       });
       return sendApiError(res, 502, 'PAYMENT_PROVIDER_ERROR');
     }
 
     // If provider complains about token, try alternative canonicalization modes.
     if (isInvalidTokenResponse(initAttempt.json)) {
-      for (const mode of tokenModes.slice(1)) {
-        console.warn('[tbank-init-invalid-token-mode-retry]', { orderId, mode });
-        initAttempt = await callInit(initPayload, mode);
+      for (const variant of tokenVariants.slice(1)) {
+        console.warn('[tbank-init-invalid-token-mode-retry]', {
+          orderId,
+          mode: variant.mode,
+          excludeReceiptFromToken: variant.excludeReceiptFromToken,
+        });
+        initAttempt = await callInit(initPayload, variant.mode, { excludeReceiptFromToken: variant.excludeReceiptFromToken });
         if (!initAttempt.response.ok || !initAttempt.json) continue;
         if (!isInvalidTokenResponse(initAttempt.json)) break;
       }
