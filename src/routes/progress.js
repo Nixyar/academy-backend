@@ -14,8 +14,9 @@ import requireUser from '../middleware/requireUser.js';
 
 const router = Router();
 
-const PROGRESS_LIST_CACHE_TTL_MS = 2500;
+const PROGRESS_LIST_CACHE_TTL_MS = 5000;
 const progressListCache = new Map(); // key -> { expiresAt, value }
+const inFlightProgressList = new Map(); // key -> Promise (deduplication)
 
 const stripLessonHeavyFields = (lesson) => {
   if (!lesson || typeof lesson !== 'object' || Array.isArray(lesson)) return lesson;
@@ -497,74 +498,95 @@ router.get('/progress', requireUser, async (req, res, next) => {
     }
 
     const cacheKey = `${user.id}:${[...courseIds].sort().join(',')}`;
+
+    // Check cache first
     const cached = progressListCache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) {
       return res.json(cached.value);
     }
 
-    // Debug: track long /progress queries (remove after confirming root cause).
-    // eslint-disable-next-line no-console
-    console.log(`[DEBUG] Fetching progress for user ${user.id} and courses ${courseIds.join(',')}`);
+    // Check if there's already an in-flight request for same key
+    const inFlight = inFlightProgressList.get(cacheKey);
+    if (inFlight) {
+      try {
+        const result = await inFlight;
+        return res.json(result);
+      } catch (err) {
+        // If in-flight failed, we'll try again below
+      }
+    }
 
     const startedAt = Date.now();
-    // eslint-disable-next-line no-console
-    console.log(`[DEBUG] Calling Supabase for user: ${user.id}`);
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10_000);
-
-    let data;
-    try {
-      const result = await supabaseAdmin
+    // Create the promise and store it for deduplication
+    const fetchPromise = (async () => {
+      // supabaseAdmin already uses fetchWithTimeout with env.supabaseTimeoutMs (8s default)
+      // No need for additional AbortController - it would conflict
+      const { data, error } = await supabaseAdmin
         .from('user_course_progress')
         .select('course_id, progress')
         .eq('user_id', user.id)
-        .in('course_id', courseIds)
-        .abortSignal(controller.signal);
+        .in('course_id', courseIds);
 
-      data = result.data;
-      const { error } = result;
       if (error) {
-        // eslint-disable-next-line no-console
-        console.error('[ERROR] Supabase returned error:', error);
-        return res.status(500).json({ error: 'FAILED_TO_FETCH_PROGRESS', details: error });
+        const err = new Error('FAILED_TO_FETCH_PROGRESS');
+        err.details = error;
+        throw err;
       }
 
-      // eslint-disable-next-line no-console
-      console.log(`[DEBUG] Supabase responded in ${Date.now() - startedAt}ms`);
+      const progressMap = {};
+      courseIds.forEach((courseId) => {
+        progressMap[courseId] = {};
+      });
+
+      (data || []).forEach((row) => {
+        progressMap[row.course_id] = stripProgressForList(row.progress);
+      });
+
+      return { progress: progressMap };
+    })();
+
+    inFlightProgressList.set(cacheKey, fetchPromise);
+
+    try {
+      const payload = await fetchPromise;
+
+      // Cache the result
+      progressListCache.set(cacheKey, {
+        expiresAt: Date.now() + PROGRESS_LIST_CACHE_TTL_MS,
+        value: payload,
+      });
+
+      const elapsed = Date.now() - startedAt;
+      if (elapsed >= env.slowLogMs) {
+        // eslint-disable-next-line no-console
+        console.warn('[slow-progress-list]', { userId: user.id, courseCount: courseIds.length, ms: elapsed });
+      }
+
+      return res.json(payload);
     } catch (err) {
-      const isAbort =
-        err && typeof err === 'object' && ('name' in err ? err.name === 'AbortError' : false);
+      const message = err instanceof Error ? err.message : String(err);
+      const isTimeout = message.includes('timeout') || message.includes('aborted');
+
       // eslint-disable-next-line no-console
-      console.error('[CRITICAL] Request failed:', err instanceof Error ? err.message : String(err));
-      return res.status(isAbort ? 504 : 500).json({
-        error: isAbort ? 'DATABASE_TIMEOUT' : 'DATABASE_ERROR',
-        message: err instanceof Error ? err.message : String(err),
+      console.error('[progress-list-error]', {
+        userId: user.id,
+        courseCount: courseIds.length,
+        ms: Date.now() - startedAt,
+        error: message,
+      });
+
+      return res.status(isTimeout ? 504 : 500).json({
+        error: isTimeout ? 'DATABASE_TIMEOUT' : 'FAILED_TO_FETCH_PROGRESS',
+        message,
+        details: err.details || null,
       });
     } finally {
-      clearTimeout(timeoutId);
+      // Clean up in-flight map
+      if (inFlightProgressList.get(cacheKey) === fetchPromise) {
+        inFlightProgressList.delete(cacheKey);
+      }
     }
-
-    const progressMap = {};
-
-    courseIds.forEach((courseId) => {
-      progressMap[courseId] = {};
-    });
-
-    (data || []).forEach((row) => {
-      progressMap[row.course_id] = stripProgressForList(row.progress);
-    });
-
-    const payload = { progress: progressMap };
-    progressListCache.set(cacheKey, { expiresAt: Date.now() + PROGRESS_LIST_CACHE_TTL_MS, value: payload });
-
-    const elapsed = Date.now() - startedAt;
-    if (elapsed >= env.slowLogMs) {
-      // eslint-disable-next-line no-console
-      console.warn('[slow-progress-list]', { userId: user.id, courseCount: courseIds.length, ms: elapsed });
-    }
-
-    return res.json(payload);
   } catch (error) {
     return next(error);
   }
