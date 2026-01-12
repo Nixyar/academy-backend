@@ -48,6 +48,11 @@ const isLikelyPaidTbankStatus = (status) => {
 router.post('/tbank/init', requireUser, async (req, res, next) => {
   try {
     if (!isConfigured()) {
+      console.warn('[tbank-not-configured]', {
+        hasTerminalKey: Boolean(env.tbankTerminalKey),
+        hasPassword: Boolean(env.tbankPassword),
+        hasApiUrl: Boolean(String(env.tbankApiUrl || '').trim()),
+      });
       return sendApiError(res, 503, 'PAYMENTS_NOT_CONFIGURED', {
         details: {
           hasTerminalKey: Boolean(env.tbankTerminalKey),
