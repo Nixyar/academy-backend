@@ -780,7 +780,6 @@ const fetchLessonPrompts = async (lessonId, opts = {}) => {
 
 const callLlm = async ({ system, prompt, temperature, maxTokens, timeoutMs }) => {
   let lastError;
-  const timeout = typeof timeoutMs === 'number' && Number.isFinite(timeoutMs) ? timeoutMs : LLM_TIMEOUT_MS;
 
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
@@ -795,7 +794,6 @@ const callLlm = async ({ system, prompt, temperature, maxTokens, timeoutMs }) =>
         }),
       }, {
         name: 'llm',
-        timeoutMs: timeout,
         slowMs: env.externalSlowLogMs,
         logger: (event, data) => console.warn(`[${event}]`, data),
       }));

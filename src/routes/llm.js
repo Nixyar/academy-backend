@@ -125,7 +125,6 @@ If you need to create a new file, include it too.
       }),
     }, {
       name: 'llm-plan',
-      timeoutMs: env.llmTimeoutMs,
       slowMs: env.externalSlowLogMs,
       logger: (event, data) => console.warn(`[${event}]`, data),
     }));
@@ -167,7 +166,6 @@ ${multiFileInstruction}`;
       }),
     }, {
       name: 'llm-render',
-      timeoutMs: env.llmTimeoutMs,
       slowMs: env.externalSlowLogMs,
       logger: (event, data) => console.warn(`[${event}]`, data),
     }));
