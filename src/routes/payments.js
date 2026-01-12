@@ -247,33 +247,9 @@ router.post('/tbank/init', requireUser, async (req, res, next) => {
       }
     }
 
-    // If Receipt is enabled, some terminals validate Token without Receipt included.
-    // Retry once excluding Receipt if the provider explicitly complains about token.
     if (receipt && isInvalidTokenResponse(initAttempt.json)) {
-      const retryPayload = { ...initPayload };
-      delete retryPayload.Receipt;
-      console.warn('[tbank-init-invalid-token-retry]', { orderId, withReceipt: true });
-      initAttempt = await callInit(retryPayload, tokenModes[0]);
-      if (!initAttempt.response.ok || !initAttempt.json) {
-        await supabaseAdmin.from('course_purchases').update({ status: 'failed' }).eq('id', created.id);
-        console.error('[tbank-init-failed]', {
-          status: initAttempt.response.status,
-          statusText: initAttempt.response.statusText,
-          body: initAttempt.json,
-          bodyText: initAttempt.text || null,
-          tokenMode: initAttempt.tokenMode,
-        });
-        return sendApiError(res, 502, 'PAYMENT_PROVIDER_ERROR');
-      }
-
-      if (isInvalidTokenResponse(initAttempt.json)) {
-        for (const mode of tokenModes.slice(1)) {
-          console.warn('[tbank-init-invalid-token-mode-retry]', { orderId, mode, withoutReceipt: true });
-          initAttempt = await callInit(retryPayload, mode);
-          if (!initAttempt.response.ok || !initAttempt.json) continue;
-          if (!isInvalidTokenResponse(initAttempt.json)) break;
-        }
-      }
+      console.error('[tbank-init-invalid-token]', { orderId, hasReceipt: true });
+      return sendApiError(res, 502, 'PAYMENT_PROVIDER_ERROR');
     }
 
     const json = initAttempt.json;
