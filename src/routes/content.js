@@ -63,7 +63,7 @@ router.get('/lessons', async (req, res, next) => {
     const { course_id: courseId, slug, lesson_type: lessonType } = req.query || {};
 
     // Use selective fields to avoid fetching heavy LLM prompts for the whole list
-    const selectFields = 'id, course_id, slug, title, description, lesson_type, sort_order, status, access, settings';
+    const selectFields = 'id, course_id, slug, title, lesson_type, sort_order, status, access, settings';
     let query = supabaseAnon.from('lessons').select(selectFields).order('sort_order', { ascending: true });
 
     if (courseId) {
