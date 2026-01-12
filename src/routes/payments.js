@@ -27,9 +27,17 @@ const isConfigured = () => {
 
 const readTbankJsonSafe = async (response) => {
   try {
-    return await response.json();
+    const text = await response.text();
+    if (!text) return { json: null, text: '' };
+
+    const truncated = text.length > 2000 ? `${text.slice(0, 2000)}…` : text;
+    try {
+      return { json: JSON.parse(text), text: truncated };
+    } catch {
+      return { json: null, text: truncated };
+    }
   } catch {
-    return null;
+    return { json: null, text: '' };
   }
 };
 
@@ -205,10 +213,15 @@ router.post('/tbank/init', requireUser, async (req, res, next) => {
       logger: (event, data) => console.warn(`[${event}]`, data),
     });
 
-    const json = await readTbankJsonSafe(response);
+    const { json, text: responseText } = await readTbankJsonSafe(response);
     if (!response.ok || !json) {
       await supabaseAdmin.from('course_purchases').update({ status: 'failed' }).eq('id', created.id);
-      console.error('[tbank-init-failed]', { status: response.status, statusText: response.statusText, body: json });
+      console.error('[tbank-init-failed]', {
+        status: response.status,
+        statusText: response.statusText,
+        body: json,
+        bodyText: responseText || null,
+      });
       return sendApiError(res, 502, 'PAYMENT_PROVIDER_ERROR');
     }
 
@@ -327,9 +340,14 @@ router.post('/tbank/sync', requireUser, async (req, res, next) => {
       logger: (event, data) => console.warn(`[${event}]`, data),
     });
 
-    const json = await readTbankJsonSafe(response);
+    const { json, text: responseText } = await readTbankJsonSafe(response);
     if (!response.ok || !json) {
-      console.error('[tbank-get-state-failed]', { status: response.status, statusText: response.statusText, body: json });
+      console.error('[tbank-get-state-failed]', {
+        status: response.status,
+        statusText: response.statusText,
+        body: json,
+        bodyText: responseText || null,
+      });
       return sendApiError(res, 502, 'PAYMENT_PROVIDER_ERROR');
     }
 
