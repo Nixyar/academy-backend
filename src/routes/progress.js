@@ -400,6 +400,7 @@ router.patch('/v1/progress/active-file', requireUser, async (req, res, next) => 
     return res.json({
       courseId,
       course_id: courseId.trim(),
+      progress: savedWorkspace,
       result: {
         files: savedWorkspace.result.files,
         active_file: savedWorkspace.result.active_file,
