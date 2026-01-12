@@ -96,16 +96,16 @@ export const normalizeProgress = (progress) => {
 
   const normalizedResult = progress.result && typeof progress.result === 'object' && !Array.isArray(progress.result)
     ? {
-        html: resultRaw?.html ?? null,
-        files: normalizeFiles(resultRaw?.files) ?? undefined,
-        active_file:
-          typeof resultRaw?.active_file === 'string'
-            ? resultRaw.active_file
-            : (typeof resultRaw?.activeFile === 'string' ? resultRaw.activeFile : undefined),
-        meta: resultRaw?.meta && typeof resultRaw.meta === 'object' && !Array.isArray(resultRaw.meta)
-          ? { ...resultRaw.meta }
-          : {},
-      }
+      html: resultRaw?.html ?? null,
+      files: normalizeFiles(resultRaw?.files) ?? undefined,
+      active_file:
+        typeof resultRaw?.active_file === 'string'
+          ? resultRaw.active_file
+          : (typeof resultRaw?.activeFile === 'string' ? resultRaw.activeFile : undefined),
+      meta: resultRaw?.meta && typeof resultRaw.meta === 'object' && !Array.isArray(resultRaw.meta)
+        ? { ...resultRaw.meta }
+        : {},
+    }
     : { html: null, meta: {} };
 
   return {
@@ -121,27 +121,34 @@ export const normalizeProgress = (progress) => {
 
 export const isActiveJobRunning = (job) => !!job && ACTIVE_JOB_STATUSES.has(job.status);
 
-export const loadCourseProgress = async (userId, courseId) => {
+export const loadCourseProgress = async (userId, courseId, opts = {}) => {
   let lastError;
+  const selectFields = opts.onlyStatus
+    ? 'progress->active_job, updated_at'
+    : 'progress, updated_at';
 
   for (let attempt = 1; attempt <= 3; attempt += 1) {
-    const { data, error } = await supabaseAdmin
+    const query = supabaseAdmin
       .from('user_course_progress')
-      .select('progress, updated_at')
+      .select(selectFields)
       .eq('user_id', userId)
       .eq('course_id', courseId)
       .maybeSingle();
 
+    const { data, error } = await query;
+
     if (!error) {
+      const rawProgress = data?.progress || (data?.active_job ? { active_job: data.active_job } : {});
       return {
-        progress: normalizeProgress(data?.progress),
+        progress: normalizeProgress(rawProgress),
         updatedAt: data?.updated_at || null,
       };
     }
 
     lastError = error;
     if (attempt < 3 && isRetryableSupabaseMessage(error.message)) {
-      await sleep(250 * attempt + Math.floor(Math.random() * 200));
+      // Exponential backoff with jitter
+      await sleep(500 * attempt + Math.floor(Math.random() * 300));
       continue;
     }
     break;
@@ -163,7 +170,7 @@ export const saveCourseProgress = async (userId, courseId, progress) => {
 
   let lastError;
 
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
     const { data, error } = await supabaseAdmin
       .from('user_course_progress')
       .upsert([payload], { onConflict: 'user_id,course_id' })
@@ -178,8 +185,8 @@ export const saveCourseProgress = async (userId, courseId, progress) => {
     }
 
     lastError = error;
-    if (attempt < 3 && isRetryableSupabaseMessage(error.message)) {
-      await sleep(300 * attempt + Math.floor(Math.random() * 200));
+    if (attempt < 2 && isRetryableSupabaseMessage(error.message)) {
+      await sleep(800 * attempt + Math.floor(Math.random() * 400));
       continue;
     }
     break;
@@ -191,13 +198,29 @@ export const saveCourseProgress = async (userId, courseId, progress) => {
   throw err;
 };
 
-export const mutateCourseProgress = async (userId, courseId, mutator) => {
-  const { progress: current, updatedAt } = await loadCourseProgress(userId, courseId);
+export const mutateCourseProgress = async (userId, courseId, mutator, opts = {}) => {
+  // If we only need status for mutation check, we can load it partially first
+  // But usually mutator needs full state. If opts.onlyStatus is true, we assume mutator is smart.
+  const { progress: current, updatedAt } = await loadCourseProgress(userId, courseId, opts);
   const draft = normalizeProgress({ ...current });
   const next = await mutator(draft);
 
   if (!next) {
     return { progress: current, updatedAt };
+  }
+
+  // If we loaded partially, WE CANNOT SAVE back partially as it would overwrite other fields!
+  // Unless we use a specialized SQL update. For now, if we mutate, we should probably have full state.
+  // Specialized optimization: if only active_job changed, use a RPC or specialized update.
+
+  if (opts.onlyStatus) {
+    // Safety: if we only loaded status, we should not attempt to save the whole object
+    // Let's reload full if we actually have a change
+    const { progress: fullCurrent } = await loadCourseProgress(userId, courseId);
+    const fullDraft = normalizeProgress({ ...fullCurrent });
+    const fullNext = await mutator(fullDraft);
+    if (!fullNext) return { progress: fullCurrent, updatedAt };
+    return saveCourseProgress(userId, courseId, fullNext);
   }
 
   return saveCourseProgress(userId, courseId, next);

@@ -222,12 +222,14 @@ router.get('/courses/:courseId/progress', requireUser, async (req, res, next) =>
   try {
     const courseId = String(req.params?.courseId || '').trim();
     const { user } = req;
+    const onlyStatus = req.query?.onlyStatus === 'true';
 
     if (!courseId) {
       return res.status(400).json({ error: 'courseId is required' });
     }
 
-    let { progress, updatedAt } = await loadCourseProgress(user.id, courseId);
+    // Optimization: if client asks for only status, or by default for status checks, use partial fetch
+    let { progress, updatedAt } = await loadCourseProgress(user.id, courseId, { onlyStatus });
 
     const activeJob = progress.active_job;
     const lastHeartbeat = getHeartbeatMs(activeJob, updatedAt);
@@ -247,14 +249,14 @@ router.get('/courses/:courseId/progress', requireUser, async (req, res, next) =>
             error: 'STALE_HEARTBEAT',
           },
         };
-      });
+      }, { onlyStatus: true });
       progress = failed.progress;
       updatedAt = failed.updatedAt;
     }
 
     return res.json({
       courseId,
-      progress,
+      progress: onlyStatus ? { active_job: progress.active_job } : progress,
       updatedAt,
     });
   } catch (error) {
@@ -520,11 +522,18 @@ router.get('/progress', requireUser, async (req, res, next) => {
 
     // Create the promise and store it for deduplication
     const fetchPromise = (async () => {
-      // supabaseAdmin already uses fetchWithTimeout with env.supabaseTimeoutMs (8s default)
-      // No need for additional AbortController - it would conflict
+      // Optimization: use Postgres JSONB operators to select only light metadata
+      // This prevents fetching massive result.html / result.files for the whole list
       const { data, error } = await supabaseAdmin
         .from('user_course_progress')
-        .select('course_id, progress')
+        .select(`
+          course_id, 
+          progress->resume_lesson_id, 
+          progress->last_viewed_lesson_id, 
+          progress->active_job, 
+          progress->lessons,
+          progress->result->meta
+        `)
         .eq('user_id', user.id)
         .in('course_id', courseIds);
 
@@ -540,7 +549,17 @@ router.get('/progress', requireUser, async (req, res, next) => {
       });
 
       (data || []).forEach((row) => {
-        progressMap[row.course_id] = stripProgressForList(row.progress);
+        // Reconstruct a light progress object from partial fields
+        const lightProgress = {
+          resume_lesson_id: row.resume_lesson_id,
+          last_viewed_lesson_id: row.last_viewed_lesson_id,
+          active_job: row.active_job,
+          lessons: row.lessons || {},
+          result: {
+            meta: row.meta || {},
+          },
+        };
+        progressMap[row.course_id] = stripProgressForList(lightProgress);
       });
 
       return { progress: progressMap };
