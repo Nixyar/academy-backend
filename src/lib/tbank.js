@@ -46,3 +46,16 @@ export const createTbankTokenExcluding = (payload, password, { excludeKeys = [],
   );
   return createTbankToken(filtered, password, mode);
 };
+
+export const verifyTbankToken = (payload, password, incomingToken, { excludeKeys = [] } = {}) => {
+  const token = String(incomingToken || '').trim().toLowerCase();
+  if (!token) return false;
+
+  const modes = ['password_key', 'append_password', 'key_value'];
+  for (const mode of modes) {
+    const expected = createTbankTokenExcluding(payload, password, { excludeKeys, mode }).toLowerCase();
+    if (expected === token) return true;
+  }
+
+  return false;
+};

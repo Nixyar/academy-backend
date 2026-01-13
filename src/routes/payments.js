@@ -3,7 +3,7 @@ import crypto from 'crypto';
 import requireUser from '../middleware/requireUser.js';
 import supabaseAdmin from '../lib/supabaseAdmin.js';
 import env from '../config/env.js';
-import { createTbankTokenExcluding } from '../lib/tbank.js';
+import { createTbankTokenExcluding, verifyTbankToken } from '../lib/tbank.js';
 import { fetchWithTimeout } from '../lib/fetchWithTimeout.js';
 import { sendApiError } from '../lib/publicErrors.js';
 
@@ -23,6 +23,19 @@ const getApiUrl = (path) => {
 const isConfigured = () => {
   const apiUrl = String(env.tbankApiUrl || '').trim();
   return Boolean(env.tbankTerminalKey && env.tbankPassword && apiUrl);
+};
+
+const getPublicBaseUrl = (req) => {
+  const proto =
+    (req.get('x-forwarded-proto') || '').split(',')[0].trim()
+    || req.protocol
+    || 'https';
+  const host =
+    (req.get('x-forwarded-host') || '').split(',')[0].trim()
+    || req.get('host')
+    || '';
+  if (!host) return null;
+  return `${proto}://${host}`;
 };
 
 const readTbankJsonSafe = async (response) => {
@@ -58,6 +71,39 @@ const isInvalidTokenResponse = (json) => {
   const errorCode = String(json.ErrorCode || json.errorCode || '').trim();
   const details = String(json.Details || json.details || '').toLowerCase();
   return errorCode === '204' && details.includes('токен');
+};
+
+const isMissingRelationError = (error) => {
+  const message = error && typeof error === 'object' && 'message' in error ? String(error.message) : '';
+  return /relation .* does not exist/i.test(message);
+};
+
+const grantUserCourse = async ({ userId, courseId, purchaseId, status }) => {
+  const grantedAt = new Date().toISOString();
+  try {
+    const { error } = await supabaseAdmin
+      .from('user_courses')
+      .upsert(
+        {
+          user_id: userId,
+          course_id: courseId,
+          purchase_id: purchaseId,
+          status: status || 'active',
+          granted_at: grantedAt,
+        },
+        { onConflict: 'user_id,course_id' },
+      );
+
+    if (error) {
+      if (isMissingRelationError(error)) return false;
+      console.error('[user-courses-upsert-failed]', { message: error.message });
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error('[user-courses-upsert-crash]', { error: err instanceof Error ? err.message : String(err) });
+    return false;
+  }
 };
 
 const buildReceipt = ({ userEmail, courseTitle, amountKopeks }) => {
@@ -138,6 +184,9 @@ router.post('/tbank/init', requireUser, async (req, res, next) => {
     const webOrigin = origin || fallbackOrigin;
     const successUrl = env.tbankSuccessUrl || (webOrigin ? `${webOrigin}/profile?payment=success&orderId=${encodeURIComponent(orderId)}` : null);
     const failUrl = env.tbankFailUrl || (webOrigin ? `${webOrigin}/profile?payment=fail&orderId=${encodeURIComponent(orderId)}` : null);
+    const publicBaseUrl = getPublicBaseUrl(req);
+    const notificationUrl = env.tbankNotificationUrl
+      || (publicBaseUrl ? `${publicBaseUrl}/api/payments/tbank/notification` : null);
 
     const { user } = req;
     const insertRow = {
@@ -167,7 +216,7 @@ router.post('/tbank/init', requireUser, async (req, res, next) => {
       Description: course.title ? `Покупка курса: ${course.title}` : 'Покупка курса',
       ...(successUrl ? { SuccessURL: successUrl } : {}),
       ...(failUrl ? { FailURL: failUrl } : {}),
-      ...(env.tbankNotificationUrl ? { NotificationURL: env.tbankNotificationUrl } : {}),
+      ...(notificationUrl ? { NotificationURL: notificationUrl } : {}),
     };
 
     let receipt = null;
@@ -313,8 +362,7 @@ router.post('/tbank/notification', async (req, res, next) => {
     if (!incomingToken || !terminalKey) return sendApiError(res, 400, 'INVALID_REQUEST');
     if (terminalKey !== env.tbankTerminalKey) return sendApiError(res, 403, 'FORBIDDEN');
 
-    const expected = createTbankToken(payload, env.tbankPassword);
-    if (expected.toLowerCase() !== incomingToken.toLowerCase()) {
+    if (!verifyTbankToken(payload, env.tbankPassword, incomingToken)) {
       return sendApiError(res, 403, 'FORBIDDEN');
     }
 
@@ -332,7 +380,26 @@ router.post('/tbank/notification', async (req, res, next) => {
         : {}),
     };
 
-    await supabaseAdmin.from('course_purchases').update(updates).eq('order_id', orderId);
+    const { data: updated, error: updateError } = await supabaseAdmin
+      .from('course_purchases')
+      .update(updates)
+      .eq('order_id', orderId)
+      .select('id,user_id,course_id,status,paid_at')
+      .maybeSingle();
+
+    if (updateError) {
+      console.error('[tbank-notification-update-failed]', { message: updateError.message });
+      return sendApiError(res, 500, 'INTERNAL_ERROR');
+    }
+
+    if (updated && (Boolean(updated.paid_at) || isPaidStatus(updated.status))) {
+      await grantUserCourse({
+        userId: updated.user_id,
+        courseId: updated.course_id,
+        purchaseId: updated.id,
+        status: 'active',
+      });
+    }
 
     return res.json({ ok: true });
   } catch (error) {
@@ -374,24 +441,37 @@ router.post('/tbank/sync', requireUser, async (req, res, next) => {
       TerminalKey: env.tbankTerminalKey,
       PaymentId: purchase.payment_id,
     };
-    const Token = createTbankToken(statePayload, env.tbankPassword);
+    const tokenModes = ['password_key', 'append_password', 'key_value'];
+    let json = null;
+    let responseText = null;
+    let okResponse = null;
 
-    const response = await fetchWithTimeout(getApiUrl('/GetState'), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ ...statePayload, Token }),
-    }, {
-      name: 'tbank-get-state',
-      timeoutMs: env.tbankTimeoutMs,
-      slowMs: env.externalSlowLogMs,
-      logger: (event, data) => console.warn(`[${event}]`, data),
-    });
+    for (const mode of tokenModes) {
+      const Token = createTbankTokenExcluding(statePayload, env.tbankPassword, { mode });
+      const response = await fetchWithTimeout(getApiUrl('/GetState'), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ...statePayload, Token }),
+      }, {
+        name: 'tbank-get-state',
+        timeoutMs: env.tbankTimeoutMs,
+        slowMs: env.externalSlowLogMs,
+        logger: (event, data) => console.warn(`[${event}]`, data),
+      });
 
-    const { json, text: responseText } = await readTbankJsonSafe(response);
-    if (!response.ok || !json) {
+      const parsed = await readTbankJsonSafe(response);
+      json = parsed.json;
+      responseText = parsed.text;
+      okResponse = response;
+      if (response.ok && json && !isInvalidTokenResponse(json)) {
+        break;
+      }
+    }
+
+    if (!okResponse || !okResponse.ok || !json) {
       console.error('[tbank-get-state-failed]', {
-        status: response.status,
-        statusText: response.statusText,
+        status: okResponse ? okResponse.status : null,
+        statusText: okResponse ? okResponse.statusText : null,
         body: json,
         bodyText: responseText || null,
       });
@@ -412,6 +492,15 @@ router.post('/tbank/sync', requireUser, async (req, res, next) => {
         paid_at: paidAt,
       })
       .eq('id', purchase.id);
+
+    if (paidAt || isPaidStatus(tbankStatus)) {
+      await grantUserCourse({
+        userId: user.id,
+        courseId: purchase.course_id,
+        purchaseId: purchase.id,
+        status: 'active',
+      });
+    }
 
     return res.json({ status: tbankStatus, courseId: purchase.course_id, paidAt });
   } catch (error) {
