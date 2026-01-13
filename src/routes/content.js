@@ -1,7 +1,9 @@
 import { Router } from 'express';
 import supabaseAnon from '../lib/supabaseAnon.js';
+import supabaseAdmin from '../lib/supabaseAdmin.js';
 import env from '../config/env.js';
 import { sendApiError } from '../lib/publicErrors.js';
+import { getOptionalUser } from '../lib/optionalUser.js';
 
 const router = Router();
 
@@ -72,7 +74,9 @@ router.get('/courses', async (req, res, next) => {
     const normalizedStatus = status ? normalizeParam(parseEq(status)) : '';
     const normalizedSlug = slug ? normalizeParam(parseEq(slug)) : '';
     const normalizedAccess = access ? normalizeParam(parseEq(access)) : '';
-    const cacheKey = `${normalizedStatus}|${normalizedSlug}|${normalizedAccess}`;
+    const optionalUser = await getOptionalUser(req);
+    const userKey = optionalUser?.id ? `u:${optionalUser.id}` : 'anon';
+    const cacheKey = `${userKey}|${normalizedStatus}|${normalizedSlug}|${normalizedAccess}`;
 
     const cached = coursesCache.get(cacheKey);
     if (cached) {
@@ -189,7 +193,57 @@ router.get('/courses', async (req, res, next) => {
         throw Object.assign(new Error(code), { status: statusCode, details: result.error });
       }
 
-      return result.data || [];
+      const courses = result.data || [];
+
+      if (!optionalUser?.id) return courses;
+
+      // Personalize pricing: if course is purchased/granted for this user, return price=0
+      // and mark it so frontend can open the course without extra calls.
+      let purchasedIds = new Set();
+      try {
+        const { data: userCourses, error: userCoursesError } = await supabaseAdmin
+          .from('user_courses')
+          .select('course_id,status,granted_at')
+          .eq('user_id', optionalUser.id);
+
+        if (!userCoursesError && Array.isArray(userCourses)) {
+          purchasedIds = new Set(
+            userCourses
+              .filter((row) => Boolean(row?.granted_at) || ['active', 'granted', 'paid', 'confirmed'].includes(String(row?.status || '').toLowerCase()))
+              .map((row) => row.course_id)
+              .filter(Boolean),
+          );
+        } else {
+          // Fallback to legacy purchases table if needed.
+          const { data: purchases, error: purchasesError } = await supabaseAdmin
+            .from('course_purchases')
+            .select('course_id,status,paid_at')
+            .eq('user_id', optionalUser.id);
+          if (!purchasesError && Array.isArray(purchases)) {
+            purchasedIds = new Set(
+              purchases
+                .filter((row) => Boolean(row?.paid_at) || ['paid', 'succeeded', 'success', 'completed', 'captured', 'confirmed'].includes(String(row?.status || '').toLowerCase()))
+                .map((row) => row.course_id)
+                .filter(Boolean),
+            );
+          }
+        }
+      } catch (e) {
+        // ignore personalization failures; return public list
+        return courses;
+      }
+
+      if (purchasedIds.size === 0) return courses;
+
+      return courses.map((course) => {
+        if (!course?.id || !purchasedIds.has(course.id)) return course;
+        return {
+          ...course,
+          is_purchased: true,
+          price: 0,
+          sale_price: 0,
+        };
+      });
     })();
 
     coursesInFlight.set(cacheKey, promise);
