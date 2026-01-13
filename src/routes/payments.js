@@ -25,6 +25,25 @@ const isConfigured = () => {
   return Boolean(env.tbankTerminalKey && env.tbankPassword && apiUrl);
 };
 
+const isAllowedRedirectUrl = (url) => {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url);
+    const origin = parsed.origin;
+    return Array.isArray(env.webOrigins) && env.webOrigins.some((allowed) => allowed === origin);
+  } catch {
+    return false;
+  }
+};
+
+const withQuery = (url, params) => {
+  const parsed = new URL(url);
+  for (const [key, value] of Object.entries(params || {})) {
+    parsed.searchParams.set(key, String(value));
+  }
+  return parsed.toString();
+};
+
 const getPublicBaseUrl = (req) => {
   const proto =
     (req.get('x-forwarded-proto') || '').split(',')[0].trim()
@@ -243,8 +262,23 @@ router.post('/tbank/init', requireUser, async (req, res, next) => {
     const origin = req.headers.origin && typeof req.headers.origin === 'string' ? req.headers.origin : null;
     const fallbackOrigin = Array.isArray(env.webOrigins) ? env.webOrigins[0] : null;
     const webOrigin = origin || fallbackOrigin;
-    const successUrl = env.tbankSuccessUrl || (webOrigin ? `${webOrigin}/profile?payment=success&orderId=${encodeURIComponent(orderId)}` : null);
-    const failUrl = env.tbankFailUrl || (webOrigin ? `${webOrigin}/profile?payment=fail&orderId=${encodeURIComponent(orderId)}` : null);
+    const defaultSuccessUrl = webOrigin ? `${webOrigin}/profile` : null;
+    const defaultFailUrl = webOrigin ? `${webOrigin}/profile` : null;
+
+    // Important: user needs to return to our app with orderId so we can call `/tbank/sync`
+    // and update `course_purchases` + grant `user_courses`.
+    const configuredSuccessUrl = isAllowedRedirectUrl(env.tbankSuccessUrl) ? env.tbankSuccessUrl : null;
+    const configuredFailUrl = isAllowedRedirectUrl(env.tbankFailUrl) ? env.tbankFailUrl : null;
+
+    const successUrlBase = configuredSuccessUrl || defaultSuccessUrl;
+    const failUrlBase = configuredFailUrl || defaultFailUrl;
+
+    const successUrl = successUrlBase
+      ? withQuery(successUrlBase, { payment: 'success', orderId })
+      : null;
+    const failUrl = failUrlBase
+      ? withQuery(failUrlBase, { payment: 'fail', orderId })
+      : null;
     const publicBaseUrl = getPublicBaseUrl(req);
     const notificationUrl = env.tbankNotificationUrl
       || (env.publicApiUrl ? `${env.publicApiUrl}/api/payments/tbank/notification` : null)
@@ -433,6 +467,7 @@ router.post('/tbank/notification', async (req, res, next) => {
     const status = String(payload.Status || payload.status || '').trim().toLowerCase();
 
     if (!orderId) return sendApiError(res, 400, 'INVALID_REQUEST');
+    console.info('[tbank-notification]', { orderId, paymentId, status });
 
     const updates = {
       status: status || 'unknown',

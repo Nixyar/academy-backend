@@ -17,6 +17,27 @@ const isGrantedStatus = (status) => {
   return ['active', 'granted', 'paid', 'confirmed'].includes(normalized);
 };
 
+const upsertUserCourse = async ({ userId, courseId, purchaseId }) => {
+  try {
+    const grantedAt = new Date().toISOString();
+    const { error } = await supabaseAdmin
+      .from('user_courses')
+      .upsert(
+        {
+          user_id: userId,
+          course_id: courseId,
+          purchase_id: purchaseId,
+          status: 'active',
+          granted_at: grantedAt,
+        },
+        { onConflict: 'user_id,course_id' },
+      );
+    return !error;
+  } catch {
+    return false;
+  }
+};
+
 router.get('/courses', requireUser, async (req, res, next) => {
   try {
     const { user } = req;
@@ -27,7 +48,7 @@ router.get('/courses', requireUser, async (req, res, next) => {
       .select('course_id,status,granted_at')
       .eq('user_id', user.id);
 
-    if (!userCoursesError) {
+    if (!userCoursesError && (granted || []).length > 0) {
       const purchasedCourseIds = (granted || [])
         .filter((row) => Boolean(row?.granted_at) || isGrantedStatus(row?.status))
         .map((row) => row.course_id)
@@ -37,17 +58,25 @@ router.get('/courses', requireUser, async (req, res, next) => {
 
     const { data, error } = await supabaseAdmin
       .from('course_purchases')
-      .select('course_id,status,paid_at')
+      .select('id,course_id,status,paid_at')
       .eq('user_id', user.id);
 
     if (error) {
       return sendApiError(res, 500, 'INTERNAL_ERROR');
     }
 
-    const purchasedCourseIds = (data || [])
+    const paidRows = (data || [])
       .filter((row) => Boolean(row?.paid_at) || isPaidStatus(row?.status))
-      .map((row) => row.course_id)
-      .filter(Boolean);
+      .filter((row) => Boolean(row?.course_id));
+
+    // Backfill `user_courses` for old rows or when the access table was cleared manually.
+    if (!userCoursesError && paidRows.length > 0) {
+      await Promise.allSettled(
+        paidRows.map((row) => upsertUserCourse({ userId: user.id, courseId: row.course_id, purchaseId: row.id })),
+      );
+    }
+
+    const purchasedCourseIds = paidRows.map((row) => row.course_id);
 
     return res.json({ courseIds: purchasedCourseIds });
   } catch (error) {
