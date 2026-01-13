@@ -35,6 +35,7 @@ const getPublicBaseUrl = (req) => {
     || req.get('host')
     || '';
   if (!host) return null;
+  if (/^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(host)) return null;
   return `${proto}://${host}`;
 };
 
@@ -78,6 +79,19 @@ const isMissingRelationError = (error) => {
   return /relation .* does not exist/i.test(message);
 };
 
+const normalizeSupabaseErrorMessage = (error) => {
+  if (!error || typeof error !== 'object') return '';
+  if ('message' in error) return String(error.message || '');
+  return '';
+};
+
+const isOnConflictConstraintError = (error) => {
+  const message = normalizeSupabaseErrorMessage(error).toLowerCase();
+  // Postgres: "there is no unique or exclusion constraint matching the ON CONFLICT specification"
+  // Supabase often forwards this as plain message.
+  return message.includes('on conflict') && message.includes('constraint');
+};
+
 const grantUserCourse = async ({ userId, courseId, purchaseId, status }) => {
   const grantedAt = new Date().toISOString();
   try {
@@ -94,12 +108,59 @@ const grantUserCourse = async ({ userId, courseId, purchaseId, status }) => {
         { onConflict: 'user_id,course_id' },
       );
 
-    if (error) {
-      if (isMissingRelationError(error)) return false;
-      console.error('[user-courses-upsert-failed]', { message: error.message });
-      return false;
+    if (!error) return true;
+    if (isMissingRelationError(error)) return false;
+
+    // Fallback if the table doesn't have a unique constraint for (user_id, course_id).
+    if (isOnConflictConstraintError(error)) {
+      const { data: existing, error: selectError } = await supabaseAdmin
+        .from('user_courses')
+        .select('id')
+        .eq('user_id', userId)
+        .eq('course_id', courseId)
+        .maybeSingle();
+
+      if (selectError && !isMissingRelationError(selectError)) {
+        console.error('[user-courses-select-failed]', { message: selectError.message });
+        return false;
+      }
+
+      if (existing?.id) {
+        const { error: updateError } = await supabaseAdmin
+          .from('user_courses')
+          .update({
+            purchase_id: purchaseId,
+            status: status || 'active',
+            granted_at: grantedAt,
+          })
+          .eq('id', existing.id);
+
+        if (updateError) {
+          console.error('[user-courses-update-failed]', { message: updateError.message });
+          return false;
+        }
+        return true;
+      }
+
+      const { error: insertError } = await supabaseAdmin
+        .from('user_courses')
+        .insert({
+          user_id: userId,
+          course_id: courseId,
+          purchase_id: purchaseId,
+          status: status || 'active',
+          granted_at: grantedAt,
+        });
+
+      if (insertError) {
+        console.error('[user-courses-insert-failed]', { message: insertError.message });
+        return false;
+      }
+      return true;
     }
-    return true;
+
+    console.error('[user-courses-upsert-failed]', { message: normalizeSupabaseErrorMessage(error) });
+    return false;
   } catch (err) {
     console.error('[user-courses-upsert-crash]', { error: err instanceof Error ? err.message : String(err) });
     return false;
@@ -186,6 +247,7 @@ router.post('/tbank/init', requireUser, async (req, res, next) => {
     const failUrl = env.tbankFailUrl || (webOrigin ? `${webOrigin}/profile?payment=fail&orderId=${encodeURIComponent(orderId)}` : null);
     const publicBaseUrl = getPublicBaseUrl(req);
     const notificationUrl = env.tbankNotificationUrl
+      || (env.publicApiUrl ? `${env.publicApiUrl}/api/payments/tbank/notification` : null)
       || (publicBaseUrl ? `${publicBaseUrl}/api/payments/tbank/notification` : null);
 
     const { user } = req;

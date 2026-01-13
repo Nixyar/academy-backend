@@ -9,7 +9,7 @@ const normalizeStatus = (status) => String(status || '').trim().toLowerCase();
 
 const isPaidStatus = (status) => {
   const normalized = normalizeStatus(status);
-  return ['paid', 'succeeded', 'success', 'completed', 'captured'].includes(normalized);
+  return ['paid', 'succeeded', 'success', 'completed', 'captured', 'confirmed'].includes(normalized);
 };
 
 const isGrantedStatus = (status) => {

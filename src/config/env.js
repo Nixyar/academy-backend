@@ -70,6 +70,7 @@ const env = {
   tbankReceiptTax: String(process.env.TBANK_RECEIPT_TAX || '').trim() || null,
   tbankReceiptPaymentMethod: String(process.env.TBANK_RECEIPT_PAYMENT_METHOD || '').trim() || null,
   tbankReceiptPaymentObject: String(process.env.TBANK_RECEIPT_PAYMENT_OBJECT || '').trim() || null,
+  publicApiUrl: String(process.env.PUBLIC_API_URL || '').trim().replace(/\/+$/, '') || null,
 };
 
 export default env;
