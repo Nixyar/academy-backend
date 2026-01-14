@@ -10,6 +10,7 @@ import contentRouter from './routes/content.js';
 import progressRouter from './routes/progress.js';
 import purchasesRouter from './routes/purchases.js';
 import paymentsRouter from './routes/payments.js';
+import coursesRouter from './routes/courses.js';
 
 const app = express();
 
@@ -82,6 +83,7 @@ api.use('/payments', paymentsRouter);
 api.use('/lessons', llmRouter);
 api.use('/v1/html', htmlRouter);
 api.use('/', progressRouter);
+api.use('/courses', coursesRouter);
 api.use('/rest/v1', contentRouter);
 
 app.use('/api', api);
