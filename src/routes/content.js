@@ -29,12 +29,17 @@ const isMissingColumnError = (error, columnName) => {
   const message = error && typeof error === 'object' && 'message' in error ? String(error.message) : '';
   const normalizedColumn = String(columnName || '').trim();
   if (!normalizedColumn) return false;
-  const hasColumnToken = new RegExp(`\\b${normalizedColumn.replace(/[-/\\^$*+?.()|[\\]{}]/g, '\\\\$&')}\\b`).test(message);
-  return (
+  const escapedColumn = normalizedColumn.replace(/[-/\\^$*+?.()|[\\]{}]/g, '\\$&');
+  const hasQualifiedColumn = new RegExp(`\\b\\w+\\.${escapedColumn}\\b`, 'i').test(message);
+  const hasRawColumn = new RegExp(`\\b${escapedColumn}\\b`, 'i').test(message);
+  const mentionsColumn =
     message.includes(`column "${columnName}"`) ||
     message.includes(`column '${columnName}'`) ||
     message.includes(`column ${columnName}`) ||
-    (hasColumnToken && /schema cache|could not find|not found/i.test(message))
+    hasQualifiedColumn ||
+    hasRawColumn;
+  return (
+    mentionsColumn && /does not exist|schema cache|could not find|not found/i.test(message)
   );
 };
 
