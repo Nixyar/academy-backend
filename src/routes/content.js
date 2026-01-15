@@ -252,6 +252,11 @@ router.get('/courses', async (req, res, next) => {
                 if (!('labels' in course) && 'labels' in extra) course.labels = extra.labels;
                 if (!('label' in course) && 'label' in extra) course.label = extra.label;
               }
+              // eslint-disable-next-line no-console
+              console.warn('[courses-labels-enriched]', { count: ids.length });
+            } else if (labelsResult.error) {
+              // eslint-disable-next-line no-console
+              console.warn('[courses-labels-enrich-failed]', { message: labelsResult.error.message });
             }
           }
         }
