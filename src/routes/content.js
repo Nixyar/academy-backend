@@ -27,10 +27,14 @@ const normalizeParam = (value) => String(value || '').trim();
 
 const isMissingColumnError = (error, columnName) => {
   const message = error && typeof error === 'object' && 'message' in error ? String(error.message) : '';
+  const normalizedColumn = String(columnName || '').trim();
+  if (!normalizedColumn) return false;
+  const hasColumnToken = new RegExp(`\\b${normalizedColumn.replace(/[-/\\^$*+?.()|[\\]{}]/g, '\\\\$&')}\\b`).test(message);
   return (
     message.includes(`column "${columnName}"`) ||
     message.includes(`column '${columnName}'`) ||
-    message.includes(`column ${columnName}`)
+    message.includes(`column ${columnName}`) ||
+    (hasColumnToken && /schema cache|could not find|not found/i.test(message))
   );
 };
 
@@ -116,6 +120,7 @@ router.get('/courses', async (req, res, next) => {
     };
 
     const startedAt = Date.now();
+    const meta = { stage: 'primary', enriched: false, enrichError: null };
     const promise = (async () => {
       // 1) Try full select ordered by sort_order
       let result = await buildQuery(primarySelect);
@@ -126,6 +131,7 @@ router.get('/courses', async (req, res, next) => {
 
       // If sort_order doesn't exist, retry with stable order (title)
       if (result.error && isMissingColumnError(result.error, 'sort_order')) {
+        meta.stage = 'order-fallback';
         // eslint-disable-next-line no-console
         console.warn('[courses-order-fallback]', { message: result.error.message });
         result = await buildQuery(primarySelect, { orderBy: 'title' });
@@ -137,6 +143,7 @@ router.get('/courses', async (req, res, next) => {
 
       // Back-compat: if legacy `label` column doesn't exist, drop it first
       if (result.error && isMissingColumnError(result.error, 'label')) {
+        meta.stage = 'drop-label';
         // eslint-disable-next-line no-console
         console.warn('[courses-select-fallback]', { stage: 'drop-label', message: result.error.message });
         result = await buildQuery(noLabelSelect);
@@ -146,6 +153,7 @@ router.get('/courses', async (req, res, next) => {
         }
 
         if (result.error && isMissingColumnError(result.error, 'sort_order')) {
+          meta.stage = 'drop-label-order-fallback';
           // eslint-disable-next-line no-console
           console.warn('[courses-order-fallback]', { stage: 'drop-label', message: result.error.message });
           result = await buildQuery(noLabelSelect, { orderBy: 'title' });
@@ -158,6 +166,7 @@ router.get('/courses', async (req, res, next) => {
 
       // Back-compat: if `labels` column doesn't exist, keep `label`.
       if (result.error && isMissingColumnError(result.error, 'labels')) {
+        meta.stage = 'drop-labels';
         // eslint-disable-next-line no-console
         console.warn('[courses-select-fallback]', { stage: 'drop-labels', message: result.error.message });
         result = await buildQuery(noLabelsSelect);
@@ -167,6 +176,7 @@ router.get('/courses', async (req, res, next) => {
         }
 
         if (result.error && isMissingColumnError(result.error, 'sort_order')) {
+          meta.stage = 'drop-labels-order-fallback';
           // eslint-disable-next-line no-console
           console.warn('[courses-order-fallback]', { stage: 'drop-labels', message: result.error.message });
           result = await buildQuery(noLabelsSelect, { orderBy: 'title' });
@@ -179,6 +189,7 @@ router.get('/courses', async (req, res, next) => {
 
       // If optional columns still don't exist, retry with smaller selects.
       if (result.error) {
+        meta.stage = 'fallback';
         // eslint-disable-next-line no-console
         console.warn('[courses-select-fallback]', { stage: 'fallback', message: result.error.message });
         result = await buildQuery(fallbackSelect);
@@ -189,6 +200,7 @@ router.get('/courses', async (req, res, next) => {
       }
 
       if (result.error && isMissingColumnError(result.error, 'sort_order')) {
+        meta.stage = 'fallback-order-fallback';
         // eslint-disable-next-line no-console
         console.warn('[courses-order-fallback]', { stage: 'fallback', message: result.error.message });
         result = await buildQuery(fallbackSelect, { orderBy: 'title' });
@@ -199,6 +211,7 @@ router.get('/courses', async (req, res, next) => {
       }
 
       if (result.error) {
+        meta.stage = 'minimal';
         // eslint-disable-next-line no-console
         console.warn('[courses-select-fallback-min]', { message: result.error.message });
         result = await buildQuery(minimalSelect, { orderBy: 'title' });
@@ -252,9 +265,11 @@ router.get('/courses', async (req, res, next) => {
                 if (!('labels' in course) && 'labels' in extra) course.labels = extra.labels;
                 if (!('label' in course) && 'label' in extra) course.label = extra.label;
               }
+              meta.enriched = true;
               // eslint-disable-next-line no-console
               console.warn('[courses-labels-enriched]', { count: ids.length });
             } else if (labelsResult.error) {
+              meta.enrichError = labelsResult.error.message;
               // eslint-disable-next-line no-console
               console.warn('[courses-labels-enrich-failed]', { message: labelsResult.error.message });
             }
@@ -318,6 +333,11 @@ router.get('/courses', async (req, res, next) => {
     try {
       const data = await promise;
       coursesCache.set(cacheKey, { expiresAt: Date.now() + COURSES_CACHE_TTL_MS, data });
+      res.set('x-courses-stage', String(meta.stage));
+      res.set('x-courses-enriched', meta.enriched ? '1' : '0');
+      if (meta.enrichError) {
+        res.set('x-courses-enrich-error', String(meta.enrichError).slice(0, 200));
+      }
 
       const elapsed = Date.now() - startedAt;
       if (elapsed >= env.slowLogMs) {
