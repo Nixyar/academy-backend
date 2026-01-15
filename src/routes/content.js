@@ -232,7 +232,8 @@ router.get('/courses', async (req, res, next) => {
           const ids = courses.map((course) => course?.id).filter(Boolean);
           if (ids.length > 0) {
             const fetchLabels = async (selectFields) => {
-              return supabaseAnon.from('courses').select(selectFields).in('id', ids);
+              // Use service role for enrichment to avoid column-level/RLS surprises on anon.
+              return supabaseAdmin.from('courses').select(selectFields).in('id', ids);
             };
 
             let labelsResult = await fetchLabels('id,labels,label');
