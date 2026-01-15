@@ -64,6 +64,8 @@ router.get('/courses', async (req, res, next) => {
 
     const primarySelect =
       'id,slug,title,description,cover_url,access,status,label,labels,sort_order,price,sale_price,currency';
+    const noLabelsSelect =
+      'id,slug,title,description,cover_url,access,status,label,sort_order,price,sale_price,currency';
     const noLabelSelect =
       'id,slug,title,description,cover_url,access,status,labels,sort_order,price,sale_price,currency';
     const fallbackSelect =
@@ -154,6 +156,27 @@ router.get('/courses', async (req, res, next) => {
         }
       }
 
+      // Back-compat: if `labels` column doesn't exist, keep `label`.
+      if (result.error && isMissingColumnError(result.error, 'labels')) {
+        // eslint-disable-next-line no-console
+        console.warn('[courses-select-fallback]', { stage: 'drop-labels', message: result.error.message });
+        result = await buildQuery(noLabelsSelect);
+        if (result.error && isTransientSupabaseError(result.error)) {
+          await sleep(150);
+          result = await buildQuery(noLabelsSelect);
+        }
+
+        if (result.error && isMissingColumnError(result.error, 'sort_order')) {
+          // eslint-disable-next-line no-console
+          console.warn('[courses-order-fallback]', { stage: 'drop-labels', message: result.error.message });
+          result = await buildQuery(noLabelsSelect, { orderBy: 'title' });
+          if (result.error && isTransientSupabaseError(result.error)) {
+            await sleep(150);
+            result = await buildQuery(noLabelsSelect, { orderBy: 'title' });
+          }
+        }
+      }
+
       // If optional columns still don't exist, retry with smaller selects.
       if (result.error) {
         // eslint-disable-next-line no-console
@@ -194,6 +217,44 @@ router.get('/courses', async (req, res, next) => {
       }
 
       const courses = result.data || [];
+
+      // If we ended up on a fallback select that didn't include labels, best-effort enrich them.
+      // This avoids cases where optional columns (currency/sale_price/etc) exist inconsistently across deployments
+      // and we had to use a reduced select.
+      if (Array.isArray(courses) && courses.length > 0) {
+        const someMissingLabels = courses.some(
+          (course) =>
+            course &&
+            typeof course === 'object' &&
+            (!('labels' in course) || !('label' in course)),
+        );
+        if (someMissingLabels) {
+          const ids = courses.map((course) => course?.id).filter(Boolean);
+          if (ids.length > 0) {
+            const fetchLabels = async (selectFields) => {
+              return supabaseAnon.from('courses').select(selectFields).in('id', ids);
+            };
+
+            let labelsResult = await fetchLabels('id,labels,label');
+            if (labelsResult.error && isMissingColumnError(labelsResult.error, 'label')) {
+              labelsResult = await fetchLabels('id,labels');
+            }
+            if (labelsResult.error && isMissingColumnError(labelsResult.error, 'labels')) {
+              labelsResult = await fetchLabels('id,label');
+            }
+
+            if (!labelsResult.error && Array.isArray(labelsResult.data)) {
+              const labelById = new Map(labelsResult.data.map((row) => [row?.id, row]));
+              for (const course of courses) {
+                const extra = course?.id ? labelById.get(course.id) : null;
+                if (!extra) continue;
+                if (!('labels' in course) && 'labels' in extra) course.labels = extra.labels;
+                if (!('label' in course) && 'label' in extra) course.label = extra.label;
+              }
+            }
+          }
+        }
+      }
 
       if (!optionalUser?.id) return courses;
 
