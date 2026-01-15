@@ -1,7 +1,9 @@
 import { Router } from 'express';
 import env from '../config/env.js';
 import supabaseAnon from '../lib/supabaseAnon.js';
+import { getOptionalUser } from '../lib/optionalUser.js';
 import { sendApiError } from '../lib/publicErrors.js';
+import { getSupabaseClientForRequest } from '../lib/supabaseRequest.js';
 
 const router = Router();
 
@@ -25,7 +27,8 @@ router.get('/:courseId/content', async (req, res, next) => {
     const courseId = normalizeParam(req.params?.courseId);
     if (!courseId) return sendApiError(res, 400, 'INVALID_REQUEST');
 
-    const cacheKey = courseId;
+    const optionalUser = await getOptionalUser(req);
+    const cacheKey = `${courseId}:${optionalUser?.id ?? 'anon'}`;
     const cached = contentCache.get(cacheKey);
     if (cached) {
       if (cached.expiresAt > Date.now()) return res.json(cached.data);
@@ -35,19 +38,40 @@ router.get('/:courseId/content', async (req, res, next) => {
     const inflight = contentInFlight.get(cacheKey);
     if (inflight) return res.json(await inflight);
 
+    const supabase = getSupabaseClientForRequest(req) ?? supabaseAnon;
+
     const startedAt = Date.now();
     const promise = (async () => {
-      const lessonsPrimary =
-        'id,course_id,module_id,slug,title,lesson_type,sort_order,lesson_type_ru,blocks,unlock_rule,settings,mode,settings_mode';
-      const lessonsNoModule =
-        'id,course_id,slug,title,lesson_type,sort_order,lesson_type_ru,blocks,unlock_rule,settings,mode,settings_mode';
-      const lessonsFallback =
-        'id,course_id,slug,title,lesson_type,sort_order,lesson_type_ru,blocks,settings';
+      const lessonSelectVariants = [
+        // Newest schema (includes module_id and newer optional columns)
+        'id,course_id,module_id,slug,title,lesson_type,sort_order,lesson_type_ru,blocks,unlock_rule,settings,mode,settings_mode',
+        // Older schemas that may miss unlock_rule/settings_mode
+        'id,course_id,module_id,slug,title,lesson_type,sort_order,lesson_type_ru,blocks,settings,mode',
+        'id,course_id,module_id,slug,title,lesson_type,sort_order,lesson_type_ru,blocks,settings',
+        // Minimal while still preserving module linkage when available
+        'id,course_id,module_id,slug,title,lesson_type,sort_order,blocks',
+      ];
+
+      const lessonSelectVariantsAltModuleId = [
+        // Some backends store module linkage as course_module_id instead of module_id
+        'id,course_id,course_module_id,slug,title,lesson_type,sort_order,lesson_type_ru,blocks,unlock_rule,settings,mode,settings_mode',
+        'id,course_id,course_module_id,slug,title,lesson_type,sort_order,lesson_type_ru,blocks,settings,mode',
+        'id,course_id,course_module_id,slug,title,lesson_type,sort_order,lesson_type_ru,blocks,settings',
+        'id,course_id,course_module_id,slug,title,lesson_type,sort_order,blocks',
+      ];
+
+      const lessonSelectVariantsNoModule = [
+        // Back-compat for schemas that do not have module_id at all
+        'id,course_id,slug,title,lesson_type,sort_order,lesson_type_ru,blocks,unlock_rule,settings,mode,settings_mode',
+        'id,course_id,slug,title,lesson_type,sort_order,lesson_type_ru,blocks,settings,mode',
+        'id,course_id,slug,title,lesson_type,sort_order,lesson_type_ru,blocks,settings',
+        'id,course_id,slug,title,lesson_type,sort_order,blocks',
+      ];
 
       const modulesSelect = 'id,course_id,sort_order,title';
 
       const buildLessonsQuery = (selectFields) => {
-        return supabaseAnon
+        return supabase
           .from('lessons')
           .select(selectFields)
           .eq('course_id', courseId)
@@ -55,25 +79,59 @@ router.get('/:courseId/content', async (req, res, next) => {
       };
 
       const buildModulesQuery = () => {
-        return supabaseAnon
+        return supabase
           .from('course_modules')
           .select(modulesSelect)
           .eq('course_id', courseId)
           .order('sort_order', { ascending: true });
       };
 
-      let lessonsResult = await buildLessonsQuery(lessonsPrimary);
-      if (lessonsResult.error && isMissingColumnError(lessonsResult.error, 'module_id')) {
-        lessonsResult = await buildLessonsQuery(lessonsNoModule);
-      }
-      if (lessonsResult.error) {
-        // eslint-disable-next-line no-console
-        console.warn('[course-content-lessons-fallback]', { message: lessonsResult.error.message });
-        lessonsResult = await buildLessonsQuery(lessonsFallback);
-      }
-      if (lessonsResult.error) {
-        throw Object.assign(new Error('FAILED_TO_FETCH_LESSONS'), { status: 500, details: lessonsResult.error });
-      }
+      const fetchLessonsWithFallbacks = async () => {
+        let lastError = null;
+
+        for (const selectFields of lessonSelectVariants) {
+          const result = await buildLessonsQuery(selectFields);
+          if (!result.error) return result;
+          lastError = result.error;
+          if (isMissingColumnError(result.error, 'module_id')) break;
+          // eslint-disable-next-line no-console
+          console.warn('[course-content-lessons-select-failed]', { selectFields, message: result.error.message });
+        }
+
+        for (const selectFields of lessonSelectVariantsAltModuleId) {
+          const result = await buildLessonsQuery(selectFields);
+          if (!result.error) return result;
+          lastError = result.error;
+          if (isMissingColumnError(result.error, 'course_module_id')) break;
+          // eslint-disable-next-line no-console
+          console.warn('[course-content-lessons-select-failed-alt-module]', {
+            selectFields,
+            message: result.error.message,
+          });
+        }
+
+        for (const selectFields of lessonSelectVariantsNoModule) {
+          const result = await buildLessonsQuery(selectFields);
+          if (!result.error) return result;
+          lastError = result.error;
+          // eslint-disable-next-line no-console
+          console.warn('[course-content-lessons-select-failed-no-module]', {
+            selectFields,
+            message: result.error.message,
+          });
+        }
+
+        throw Object.assign(new Error('FAILED_TO_FETCH_LESSONS'), { status: 500, details: lastError });
+      };
+
+      const lessonsResult = await fetchLessonsWithFallbacks();
+      const lessons = (lessonsResult.data || []).map((lesson) => {
+        if (!lesson || typeof lesson !== 'object') return lesson;
+        const moduleId = lesson.module_id ?? lesson.course_module_id ?? null;
+        if (moduleId == null) return lesson;
+        if (lesson.module_id != null) return lesson;
+        return { ...lesson, module_id: moduleId };
+      });
 
       let modules = [];
       try {
@@ -91,7 +149,7 @@ router.get('/:courseId/content', async (req, res, next) => {
 
       const payload = {
         courseId,
-        lessons: lessonsResult.data || [],
+        lessons,
         modules,
       };
 
@@ -119,4 +177,3 @@ router.get('/:courseId/content', async (req, res, next) => {
 });
 
 export default router;
-
