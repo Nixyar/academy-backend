@@ -12,6 +12,20 @@ const isMissingColumnError = (error, columnName) => {
   );
 };
 
+const isMissingTableError = (error, tableName) => {
+  const message = error && typeof error === 'object' && 'message' in error ? String(error.message) : '';
+  const name = String(tableName || '').trim();
+  if (!name) return false;
+  return (
+    message.includes(`relation \"${name}\" does not exist`) ||
+    message.includes(`relation '${name}' does not exist`) ||
+    message.includes(`relation ${name} does not exist`) ||
+    message.includes(`Could not find the '${name}' table`) ||
+    message.includes(`could not find the '${name}' table`) ||
+    /does not exist/i.test(message)
+  );
+};
+
 const toIntOrNull = (value) => {
   if (typeof value === 'number' && Number.isFinite(value)) return Math.trunc(value);
   if (typeof value === 'string' && value.trim()) {
@@ -59,6 +73,9 @@ async function fetchQuotaRow(userId, courseId) {
     .maybeSingle();
 
   if (result.error) {
+    if (isMissingTableError(result.error, 'llm_course_quota')) {
+      throw Object.assign(new Error('COURSE_QUOTA_NOT_CONFIGURED'), { status: 503, details: result.error });
+    }
     throw Object.assign(new Error('FAILED_TO_FETCH_COURSE_QUOTA'), { status: 500, details: result.error });
   }
 
@@ -192,4 +209,3 @@ export async function consumeCourseQuota({ userId, courseId, amount = 1 }) {
 
   throw Object.assign(new Error('COURSE_QUOTA_CONFLICT'), { status: 409 });
 }
-

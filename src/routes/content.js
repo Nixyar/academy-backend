@@ -71,16 +71,30 @@ router.get('/courses', async (req, res, next) => {
   try {
     const { status, slug, access } = req.query || {};
 
-    const primarySelect =
+    const primarySelectNoQuota =
       'id,slug,title,description,cover_url,access,status,label,labels,sort_order,price,sale_price,currency';
-    const noLabelsSelect =
+    const noLabelsSelectNoQuota =
       'id,slug,title,description,cover_url,access,status,label,sort_order,price,sale_price,currency';
-    const noLabelSelect =
+    const noLabelSelectNoQuota =
       'id,slug,title,description,cover_url,access,status,labels,sort_order,price,sale_price,currency';
-    const fallbackSelect =
+    const fallbackSelectNoQuota =
       'id,slug,title,description,cover_url,access,status,sort_order,price,sale_price,currency';
-    const minimalSelect =
+    const minimalSelectNoQuota =
       'id,slug,title,description,cover_url,access,status,price';
+
+    let primarySelect = `${primarySelectNoQuota},llm_limit`;
+    let noLabelsSelect = `${noLabelsSelectNoQuota},llm_limit`;
+    let noLabelSelect = `${noLabelSelectNoQuota},llm_limit`;
+    let fallbackSelect = `${fallbackSelectNoQuota},llm_limit`;
+    let minimalSelect = `${minimalSelectNoQuota},llm_limit`;
+
+    const disableQuotaSelects = () => {
+      primarySelect = primarySelectNoQuota;
+      noLabelsSelect = noLabelsSelectNoQuota;
+      noLabelSelect = noLabelSelectNoQuota;
+      fallbackSelect = fallbackSelectNoQuota;
+      minimalSelect = minimalSelectNoQuota;
+    };
 
     const normalizedStatus = status ? normalizeParam(parseEq(status)) : '';
     const normalizedSlug = slug ? normalizeParam(parseEq(slug)) : '';
@@ -133,6 +147,10 @@ router.get('/courses', async (req, res, next) => {
         await sleep(150);
         result = await buildQuery(primarySelect);
       }
+      if (result.error && isMissingColumnError(result.error, 'llm_limit')) {
+        disableQuotaSelects();
+        result = await buildQuery(primarySelect);
+      }
 
       // If sort_order doesn't exist, retry with stable order (title)
       if (result.error && isMissingColumnError(result.error, 'sort_order')) {
@@ -143,6 +161,10 @@ router.get('/courses', async (req, res, next) => {
       }
       if (result.error && isTransientSupabaseError(result.error)) {
         await sleep(150);
+        result = await buildQuery(primarySelect, { orderBy: 'title' });
+      }
+      if (result.error && isMissingColumnError(result.error, 'llm_limit')) {
+        disableQuotaSelects();
         result = await buildQuery(primarySelect, { orderBy: 'title' });
       }
 
@@ -156,6 +178,10 @@ router.get('/courses', async (req, res, next) => {
           await sleep(150);
           result = await buildQuery(noLabelSelect);
         }
+        if (result.error && isMissingColumnError(result.error, 'llm_limit')) {
+          disableQuotaSelects();
+          result = await buildQuery(noLabelSelect);
+        }
 
         if (result.error && isMissingColumnError(result.error, 'sort_order')) {
           meta.stage = 'drop-label-order-fallback';
@@ -164,6 +190,10 @@ router.get('/courses', async (req, res, next) => {
           result = await buildQuery(noLabelSelect, { orderBy: 'title' });
           if (result.error && isTransientSupabaseError(result.error)) {
             await sleep(150);
+            result = await buildQuery(noLabelSelect, { orderBy: 'title' });
+          }
+          if (result.error && isMissingColumnError(result.error, 'llm_limit')) {
+            disableQuotaSelects();
             result = await buildQuery(noLabelSelect, { orderBy: 'title' });
           }
         }
@@ -179,6 +209,10 @@ router.get('/courses', async (req, res, next) => {
           await sleep(150);
           result = await buildQuery(noLabelsSelect);
         }
+        if (result.error && isMissingColumnError(result.error, 'llm_limit')) {
+          disableQuotaSelects();
+          result = await buildQuery(noLabelsSelect);
+        }
 
         if (result.error && isMissingColumnError(result.error, 'sort_order')) {
           meta.stage = 'drop-labels-order-fallback';
@@ -187,6 +221,10 @@ router.get('/courses', async (req, res, next) => {
           result = await buildQuery(noLabelsSelect, { orderBy: 'title' });
           if (result.error && isTransientSupabaseError(result.error)) {
             await sleep(150);
+            result = await buildQuery(noLabelsSelect, { orderBy: 'title' });
+          }
+          if (result.error && isMissingColumnError(result.error, 'llm_limit')) {
+            disableQuotaSelects();
             result = await buildQuery(noLabelsSelect, { orderBy: 'title' });
           }
         }
@@ -203,6 +241,10 @@ router.get('/courses', async (req, res, next) => {
         await sleep(150);
         result = await buildQuery(fallbackSelect);
       }
+      if (result.error && isMissingColumnError(result.error, 'llm_limit')) {
+        disableQuotaSelects();
+        result = await buildQuery(fallbackSelect);
+      }
 
       if (result.error && isMissingColumnError(result.error, 'sort_order')) {
         meta.stage = 'fallback-order-fallback';
@@ -214,6 +256,10 @@ router.get('/courses', async (req, res, next) => {
         await sleep(150);
         result = await buildQuery(fallbackSelect, { orderBy: 'title' });
       }
+      if (result.error && isMissingColumnError(result.error, 'llm_limit')) {
+        disableQuotaSelects();
+        result = await buildQuery(fallbackSelect, { orderBy: 'title' });
+      }
 
       if (result.error) {
         meta.stage = 'minimal';
@@ -223,6 +269,10 @@ router.get('/courses', async (req, res, next) => {
       }
       if (result.error && isTransientSupabaseError(result.error)) {
         await sleep(150);
+        result = await buildQuery(minimalSelect, { orderBy: 'title' });
+      }
+      if (result.error && isMissingColumnError(result.error, 'llm_limit')) {
+        disableQuotaSelects();
         result = await buildQuery(minimalSelect, { orderBy: 'title' });
       }
 
