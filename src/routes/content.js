@@ -41,7 +41,7 @@ router.get('/courses', async (req, res, next) => {
     const { status, slug, access } = req.query || {};
 
     const selectFields =
-      'id,slug,title,description,cover_url,access,status,label,labels,sort_order,price,sale_price,currency,llm_limit';
+      'id,slug,title,description,cover_url,access,status,labels,sort_order,price,sale_price,currency,llm_limit';
 
     const normalizedStatus = status ? normalizeParam(parseEq(status)) : '';
     const normalizedSlug = slug ? normalizeParam(parseEq(slug)) : '';
