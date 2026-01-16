@@ -431,14 +431,11 @@ router.get('/lessons', async (req, res, next) => {
   try {
     const { course_id: courseId, slug, lesson_type: lessonType } = req.query || {};
 
-    // Use selective fields to avoid fetching heavy LLM prompts for the whole list.
-    // We include 'blocks' as they are required for rendering the lesson content.
-    const selectPrimary =
-      'id,course_id,slug,title,lesson_type,sort_order,lesson_type_ru,blocks,unlock_rule,settings,mode,settings_mode';
-    const selectFallback =
-      'id,course_id,slug,title,lesson_type,sort_order,lesson_type_ru,blocks,settings';
+    // Lessons list is meta-only; content is served by `GET /api/lessons/:lessonId/content`.
+    const selectFields =
+      'id,course_id,module_id,slug,title,lesson_type,lesson_type_ru,sort_order';
 
-    const buildQuery = (selectFields) => {
+    const buildQuery = () => {
       let query = supabaseAnon.from('lessons').select(selectFields).order('sort_order', { ascending: true });
 
       if (courseId) {
@@ -455,8 +452,6 @@ router.get('/lessons', async (req, res, next) => {
 
       return query;
     };
-
-    let query = buildQuery(selectPrimary);
 
     const normalizedCourseId = courseId ? normalizeParam(parseEq(courseId)) : '';
     const normalizedSlug = slug ? normalizeParam(parseEq(slug)) : '';
@@ -479,15 +474,7 @@ router.get('/lessons', async (req, res, next) => {
 
     const startedAt = Date.now();
     const promise = (async () => {
-      // supabaseAnon already handles timeouts via fetch decoration
-      let result = await query;
-      if (result.error) {
-        // Back-compat: some deployments may not have optional fields yet.
-        // eslint-disable-next-line no-console
-        console.warn('[lessons-select-fallback]', { message: result.error.message });
-        result = await buildQuery(selectFallback);
-      }
-
+      const result = await buildQuery();
       if (result.error) {
         throw Object.assign(new Error('FAILED_TO_FETCH_LESSONS'), { status: 500, details: result.error });
       }

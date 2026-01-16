@@ -696,7 +696,7 @@ const fetchLessonPrompts = async (lessonId, opts = {}) => {
 
   const { data: lesson, error } = await supabaseAdmin
     .from('lessons')
-    .select('*')
+    .select('id,llm_system_prompt,llm_plan_system_prompt,llm_render_system_prompt,settings')
     .eq('id', lessonId)
     .maybeSingle();
 

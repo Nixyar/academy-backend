@@ -1,12 +1,17 @@
 import { Router } from 'express';
 import env from '../config/env.js';
 import supabaseAdmin from '../lib/supabaseAdmin.js';
+import supabaseAnon from '../lib/supabaseAnon.js';
 import { fetchWithTimeout } from '../lib/fetchWithTimeout.js';
 import { Semaphore } from '../lib/semaphore.js';
 import { sendApiError } from '../lib/publicErrors.js';
+import { getSupabaseClientForRequest } from '../lib/supabaseRequest.js';
 
 const router = Router();
 const llmSemaphore = new Semaphore(env.llmMaxConcurrency);
+
+const LESSON_CONTENT_CACHE_TTL_MS = 60 * 1000;
+const lessonContentHashCache = new Map(); // lessonId -> { expiresAt, contentHash }
 
 const stripFences = (s) =>
   String(s || '')
@@ -48,6 +53,59 @@ const extractFirstJsonObject = (text) => {
   return repairJson(m[0]);
 };
 
+const normalizeParam = (value) => String(value || '').trim();
+
+const getHeaderString = (value) => {
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value) && typeof value[0] === 'string') return value[0];
+  return '';
+};
+
+router.get('/:lessonId/content', async (req, res, next) => {
+  try {
+    const lessonId = normalizeParam(req.params?.lessonId);
+    if (!lessonId) return sendApiError(res, 400, 'INVALID_REQUEST');
+
+    const cached = lessonContentHashCache.get(lessonId);
+    if (cached && cached.expiresAt > Date.now()) {
+      const etag = `"lesson:${lessonId}:${cached.contentHash}"`;
+      const ifNoneMatch = getHeaderString(req.headers['if-none-match']);
+      if (ifNoneMatch === etag) {
+        res.setHeader('ETag', etag);
+        return res.status(304).end();
+      }
+    } else if (cached) {
+      lessonContentHashCache.delete(lessonId);
+    }
+
+    const supabase = getSupabaseClientForRequest(req) ?? supabaseAnon;
+    const { data, error } = await supabase
+      .from('lesson_content')
+      .select('blocks, settings, unlock_rule, content_hash')
+      .eq('lesson_id', lessonId)
+      .single();
+
+    if (error) {
+      const status = typeof error.status === 'number' ? error.status : 500;
+      if (status === 406 || status === 404) return sendApiError(res, 404, 'LESSON_NOT_FOUND');
+      return sendApiError(res, 500, 'INTERNAL_ERROR');
+    }
+
+    const contentHash = data?.content_hash ?? '';
+    const etag = `"lesson:${lessonId}:${contentHash}"`;
+    lessonContentHashCache.set(lessonId, { expiresAt: Date.now() + LESSON_CONTENT_CACHE_TTL_MS, contentHash });
+
+    res.setHeader('ETag', etag);
+    return res.json({
+      blocks: data?.blocks ?? null,
+      settings: data?.settings ?? null,
+      unlock_rule: data?.unlock_rule ?? null,
+    });
+  } catch (e) {
+    return next(e);
+  }
+});
+
 router.post('/:lessonId/llm', async (req, res, next) => {
   try {
     const { lessonId } = req.params;
@@ -84,7 +142,7 @@ If you need to create a new file, include it too.
 
     const { data: lesson, error: lessonError } = await supabaseAdmin
       .from('lessons')
-      .select('*')
+      .select('id,llm_system_prompt,llm_plan_system_prompt,llm_render_system_prompt')
       .eq('id', lessonId)
       .maybeSingle();
 
