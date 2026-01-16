@@ -25,24 +25,6 @@ const parseEq = (value) => {
 
 const normalizeParam = (value) => String(value || '').trim();
 
-const isMissingColumnError = (error, columnName) => {
-  const message = error && typeof error === 'object' && 'message' in error ? String(error.message) : '';
-  const normalizedColumn = String(columnName || '').trim();
-  if (!normalizedColumn) return false;
-  const escapedColumn = normalizedColumn.replace(/[-/\\^$*+?.()|[\\]{}]/g, '\\$&');
-  const hasQualifiedColumn = new RegExp(`\\b\\w+\\.${escapedColumn}\\b`, 'i').test(message);
-  const hasRawColumn = new RegExp(`\\b${escapedColumn}\\b`, 'i').test(message);
-  const mentionsColumn =
-    message.includes(`column "${columnName}"`) ||
-    message.includes(`column '${columnName}'`) ||
-    message.includes(`column ${columnName}`) ||
-    hasQualifiedColumn ||
-    hasRawColumn;
-  return (
-    mentionsColumn && /does not exist|schema cache|could not find|not found/i.test(message)
-  );
-};
-
 const isPermissionError = (error) => {
   const message = error && typeof error === 'object' && 'message' in error ? String(error.message) : '';
   const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
@@ -54,47 +36,12 @@ const isTimeoutError = (error) => {
   return /aborted|timeout/i.test(message);
 };
 
-const isTransientSupabaseError = (error) => {
-  const message = error && typeof error === 'object' && 'message' in error ? String(error.message) : '';
-  const status = error && typeof error === 'object' && 'status' in error ? Number(error.status) : null;
-  const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
-
-  if (status && [500, 502, 503, 504].includes(status)) return true;
-  if (/schema cache|connection|ECONNRESET|ENOTFOUND|EAI_AGAIN/i.test(message)) return true;
-  if (/PGRST/i.test(code)) return true;
-  return false;
-};
-
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
 router.get('/courses', async (req, res, next) => {
   try {
     const { status, slug, access } = req.query || {};
 
-    const primarySelectNoQuota =
-      'id,slug,title,description,cover_url,access,status,label,labels,sort_order,price,sale_price,currency';
-    const noLabelsSelectNoQuota =
-      'id,slug,title,description,cover_url,access,status,label,sort_order,price,sale_price,currency';
-    const noLabelSelectNoQuota =
-      'id,slug,title,description,cover_url,access,status,labels,sort_order,price,sale_price,currency';
-    const fallbackSelectNoQuota =
-      'id,slug,title,description,cover_url,access,status,sort_order,price,sale_price,currency';
-    const minimalSelectNoQuota =
-      'id,slug,title,description,cover_url,access,status,price';
-
-    let primarySelect = `${primarySelectNoQuota},llm_limit`;
-    let noLabelsSelect = `${noLabelsSelectNoQuota},llm_limit`;
-    let noLabelSelect = `${noLabelSelectNoQuota},llm_limit`;
-    let fallbackSelect = `${fallbackSelectNoQuota},llm_limit`;
-    let minimalSelect = `${minimalSelectNoQuota},llm_limit`;
-
-    const disableQuotaSelects = () => {
-      primarySelect = primarySelectNoQuota;
-      noLabelsSelect = noLabelsSelectNoQuota;
-      noLabelSelect = noLabelSelectNoQuota;
-      fallbackSelect = fallbackSelectNoQuota;
-      minimalSelect = minimalSelectNoQuota;
-    };
+    const selectFields =
+      'id,slug,title,description,cover_url,access,status,label,labels,sort_order,price,sale_price,currency,llm_limit';
 
     const normalizedStatus = status ? normalizeParam(parseEq(status)) : '';
     const normalizedSlug = slug ? normalizeParam(parseEq(slug)) : '';
@@ -117,11 +64,8 @@ router.get('/courses', async (req, res, next) => {
       return res.json(data);
     }
 
-    const buildQuery = (selectFields, opts = {}) => {
-      let query = supabaseAnon
-        .from('courses')
-        .select(selectFields)
-        .order(opts.orderBy || 'sort_order', { ascending: true });
+    const buildQuery = () => {
+      let query = supabaseAnon.from('courses').select(selectFields).order('sort_order', { ascending: true });
 
       if (status) {
         query = query.eq('status', parseEq(status));
@@ -139,143 +83,8 @@ router.get('/courses', async (req, res, next) => {
     };
 
     const startedAt = Date.now();
-    const meta = { stage: 'primary', enriched: false, enrichError: null };
     const promise = (async () => {
-      // 1) Try full select ordered by sort_order
-      let result = await buildQuery(primarySelect);
-      if (result.error && isTransientSupabaseError(result.error)) {
-        await sleep(150);
-        result = await buildQuery(primarySelect);
-      }
-      if (result.error && isMissingColumnError(result.error, 'llm_limit')) {
-        disableQuotaSelects();
-        result = await buildQuery(primarySelect);
-      }
-
-      // If sort_order doesn't exist, retry with stable order (title)
-      if (result.error && isMissingColumnError(result.error, 'sort_order')) {
-        meta.stage = 'order-fallback';
-        // eslint-disable-next-line no-console
-        console.warn('[courses-order-fallback]', { message: result.error.message });
-        result = await buildQuery(primarySelect, { orderBy: 'title' });
-      }
-      if (result.error && isTransientSupabaseError(result.error)) {
-        await sleep(150);
-        result = await buildQuery(primarySelect, { orderBy: 'title' });
-      }
-      if (result.error && isMissingColumnError(result.error, 'llm_limit')) {
-        disableQuotaSelects();
-        result = await buildQuery(primarySelect, { orderBy: 'title' });
-      }
-
-      // Back-compat: if legacy `label` column doesn't exist, drop it first
-      if (result.error && isMissingColumnError(result.error, 'label')) {
-        meta.stage = 'drop-label';
-        // eslint-disable-next-line no-console
-        console.warn('[courses-select-fallback]', { stage: 'drop-label', message: result.error.message });
-        result = await buildQuery(noLabelSelect);
-        if (result.error && isTransientSupabaseError(result.error)) {
-          await sleep(150);
-          result = await buildQuery(noLabelSelect);
-        }
-        if (result.error && isMissingColumnError(result.error, 'llm_limit')) {
-          disableQuotaSelects();
-          result = await buildQuery(noLabelSelect);
-        }
-
-        if (result.error && isMissingColumnError(result.error, 'sort_order')) {
-          meta.stage = 'drop-label-order-fallback';
-          // eslint-disable-next-line no-console
-          console.warn('[courses-order-fallback]', { stage: 'drop-label', message: result.error.message });
-          result = await buildQuery(noLabelSelect, { orderBy: 'title' });
-          if (result.error && isTransientSupabaseError(result.error)) {
-            await sleep(150);
-            result = await buildQuery(noLabelSelect, { orderBy: 'title' });
-          }
-          if (result.error && isMissingColumnError(result.error, 'llm_limit')) {
-            disableQuotaSelects();
-            result = await buildQuery(noLabelSelect, { orderBy: 'title' });
-          }
-        }
-      }
-
-      // Back-compat: if `labels` column doesn't exist, keep `label`.
-      if (result.error && isMissingColumnError(result.error, 'labels')) {
-        meta.stage = 'drop-labels';
-        // eslint-disable-next-line no-console
-        console.warn('[courses-select-fallback]', { stage: 'drop-labels', message: result.error.message });
-        result = await buildQuery(noLabelsSelect);
-        if (result.error && isTransientSupabaseError(result.error)) {
-          await sleep(150);
-          result = await buildQuery(noLabelsSelect);
-        }
-        if (result.error && isMissingColumnError(result.error, 'llm_limit')) {
-          disableQuotaSelects();
-          result = await buildQuery(noLabelsSelect);
-        }
-
-        if (result.error && isMissingColumnError(result.error, 'sort_order')) {
-          meta.stage = 'drop-labels-order-fallback';
-          // eslint-disable-next-line no-console
-          console.warn('[courses-order-fallback]', { stage: 'drop-labels', message: result.error.message });
-          result = await buildQuery(noLabelsSelect, { orderBy: 'title' });
-          if (result.error && isTransientSupabaseError(result.error)) {
-            await sleep(150);
-            result = await buildQuery(noLabelsSelect, { orderBy: 'title' });
-          }
-          if (result.error && isMissingColumnError(result.error, 'llm_limit')) {
-            disableQuotaSelects();
-            result = await buildQuery(noLabelsSelect, { orderBy: 'title' });
-          }
-        }
-      }
-
-      // If optional columns still don't exist, retry with smaller selects.
-      if (result.error) {
-        meta.stage = 'fallback';
-        // eslint-disable-next-line no-console
-        console.warn('[courses-select-fallback]', { stage: 'fallback', message: result.error.message });
-        result = await buildQuery(fallbackSelect);
-      }
-      if (result.error && isTransientSupabaseError(result.error)) {
-        await sleep(150);
-        result = await buildQuery(fallbackSelect);
-      }
-      if (result.error && isMissingColumnError(result.error, 'llm_limit')) {
-        disableQuotaSelects();
-        result = await buildQuery(fallbackSelect);
-      }
-
-      if (result.error && isMissingColumnError(result.error, 'sort_order')) {
-        meta.stage = 'fallback-order-fallback';
-        // eslint-disable-next-line no-console
-        console.warn('[courses-order-fallback]', { stage: 'fallback', message: result.error.message });
-        result = await buildQuery(fallbackSelect, { orderBy: 'title' });
-      }
-      if (result.error && isTransientSupabaseError(result.error)) {
-        await sleep(150);
-        result = await buildQuery(fallbackSelect, { orderBy: 'title' });
-      }
-      if (result.error && isMissingColumnError(result.error, 'llm_limit')) {
-        disableQuotaSelects();
-        result = await buildQuery(fallbackSelect, { orderBy: 'title' });
-      }
-
-      if (result.error) {
-        meta.stage = 'minimal';
-        // eslint-disable-next-line no-console
-        console.warn('[courses-select-fallback-min]', { message: result.error.message });
-        result = await buildQuery(minimalSelect, { orderBy: 'title' });
-      }
-      if (result.error && isTransientSupabaseError(result.error)) {
-        await sleep(150);
-        result = await buildQuery(minimalSelect, { orderBy: 'title' });
-      }
-      if (result.error && isMissingColumnError(result.error, 'llm_limit')) {
-        disableQuotaSelects();
-        result = await buildQuery(minimalSelect, { orderBy: 'title' });
-      }
-
+      const result = await buildQuery();
       if (result.error) {
         const statusCode = isPermissionError(result.error) ? 403 : (isTimeoutError(result.error) ? 504 : 500);
         const code = isPermissionError(result.error)
@@ -285,52 +94,6 @@ router.get('/courses', async (req, res, next) => {
       }
 
       const courses = result.data || [];
-
-      // If we ended up on a fallback select that didn't include labels, best-effort enrich them.
-      // This avoids cases where optional columns (currency/sale_price/etc) exist inconsistently across deployments
-      // and we had to use a reduced select.
-      if (Array.isArray(courses) && courses.length > 0) {
-        const someMissingLabels = courses.some(
-          (course) =>
-            course &&
-            typeof course === 'object' &&
-            (!('labels' in course) || !('label' in course)),
-        );
-        if (someMissingLabels) {
-          const ids = courses.map((course) => course?.id).filter(Boolean);
-          if (ids.length > 0) {
-            const fetchLabels = async (selectFields) => {
-              // Use service role for enrichment to avoid column-level/RLS surprises on anon.
-              return supabaseAdmin.from('courses').select(selectFields).in('id', ids);
-            };
-
-            let labelsResult = await fetchLabels('id,labels,label');
-            if (labelsResult.error && isMissingColumnError(labelsResult.error, 'label')) {
-              labelsResult = await fetchLabels('id,labels');
-            }
-            if (labelsResult.error && isMissingColumnError(labelsResult.error, 'labels')) {
-              labelsResult = await fetchLabels('id,label');
-            }
-
-            if (!labelsResult.error && Array.isArray(labelsResult.data)) {
-              const labelById = new Map(labelsResult.data.map((row) => [row?.id, row]));
-              for (const course of courses) {
-                const extra = course?.id ? labelById.get(course.id) : null;
-                if (!extra) continue;
-                if (!('labels' in course) && 'labels' in extra) course.labels = extra.labels;
-                if (!('label' in course) && 'label' in extra) course.label = extra.label;
-              }
-              meta.enriched = true;
-              // eslint-disable-next-line no-console
-              console.warn('[courses-labels-enriched]', { count: ids.length });
-            } else if (labelsResult.error) {
-              meta.enrichError = labelsResult.error.message;
-              // eslint-disable-next-line no-console
-              console.warn('[courses-labels-enrich-failed]', { message: labelsResult.error.message });
-            }
-          }
-        }
-      }
 
       if (!optionalUser?.id) return courses;
 
@@ -350,20 +113,6 @@ router.get('/courses', async (req, res, next) => {
               .map((row) => row.course_id)
               .filter(Boolean),
           );
-        } else {
-          // Fallback to legacy purchases table if needed.
-          const { data: purchases, error: purchasesError } = await supabaseAdmin
-            .from('course_purchases')
-            .select('course_id,status,paid_at')
-            .eq('user_id', optionalUser.id);
-          if (!purchasesError && Array.isArray(purchases)) {
-            purchasedIds = new Set(
-              purchases
-                .filter((row) => Boolean(row?.paid_at) || ['paid', 'succeeded', 'success', 'completed', 'captured', 'confirmed'].includes(String(row?.status || '').toLowerCase()))
-                .map((row) => row.course_id)
-                .filter(Boolean),
-            );
-          }
         }
       } catch (e) {
         // ignore personalization failures; return public list
@@ -388,11 +137,6 @@ router.get('/courses', async (req, res, next) => {
     try {
       const data = await promise;
       coursesCache.set(cacheKey, { expiresAt: Date.now() + COURSES_CACHE_TTL_MS, data });
-      res.set('x-courses-stage', String(meta.stage));
-      res.set('x-courses-enriched', meta.enriched ? '1' : '0');
-      if (meta.enrichError) {
-        res.set('x-courses-enrich-error', String(meta.enrichError).slice(0, 200));
-      }
 
       const elapsed = Date.now() - startedAt;
       if (elapsed >= env.slowLogMs) {

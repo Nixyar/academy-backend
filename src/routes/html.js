@@ -694,9 +694,27 @@ const fetchLessonPrompts = async (lessonId, opts = {}) => {
   const requirePlan = opts?.requirePlan !== false;
   const requireRender = opts?.requireRender !== false;
 
+  const { data: prompts, error: promptsError } = await supabaseAdmin
+    .from('lesson_llm_prompts')
+    .select('llm_system_prompt,llm_plan_system_prompt,llm_render_system_prompt')
+    .eq('lesson_id', lessonId)
+    .single();
+
+  if (promptsError) {
+    const err = new Error('FAILED_TO_FETCH_LESSON');
+    err.status = 500;
+    err.details = promptsError.message;
+    throw err;
+  }
+  if (!prompts) {
+    const err = new Error('LESSON_NOT_FOUND');
+    err.status = 404;
+    throw err;
+  }
+
   const { data: lesson, error } = await supabaseAdmin
     .from('lessons')
-    .select('id,llm_system_prompt,llm_plan_system_prompt,llm_render_system_prompt,settings')
+    .select('id,settings')
     .eq('id', lessonId)
     .maybeSingle();
 
@@ -712,13 +730,9 @@ const fetchLessonPrompts = async (lessonId, opts = {}) => {
     throw err;
   }
 
-  const fallbackSystem = typeof lesson.llm_system_prompt === 'string' ? lesson.llm_system_prompt : null;
-  const planSystem = (
-    typeof lesson.llm_plan_system_prompt === 'string' ? lesson.llm_plan_system_prompt : null
-  ) || fallbackSystem;
-  const renderSystem = (
-    typeof lesson.llm_render_system_prompt === 'string' ? lesson.llm_render_system_prompt : null
-  ) || fallbackSystem;
+  const fallbackSystem = prompts.llm_system_prompt ?? null;
+  const planSystem = prompts.llm_plan_system_prompt ?? fallbackSystem;
+  const renderSystem = prompts.llm_render_system_prompt ?? fallbackSystem;
 
   const normalizedPlan = typeof planSystem === 'string' ? planSystem.trim() : '';
   const normalizedRender = typeof renderSystem === 'string' ? renderSystem.trim() : '';
