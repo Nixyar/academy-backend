@@ -12,6 +12,7 @@ import {
 } from '../lib/courseProgress.js';
 import { ensureWorkspace } from '../lib/htmlWorkspace.js';
 import requireUser from '../middleware/requireUser.js';
+import { getCourseQuota } from '../lib/courseQuota.js';
 
 const router = Router();
 
@@ -261,6 +262,21 @@ router.get('/courses/:courseId/progress', requireUser, async (req, res, next) =>
       return sendApiError(res, 500, 'FAILED_TO_FETCH_PROGRESS');
     }
 
+    return next(error);
+  }
+});
+
+router.get('/courses/:courseId/quota', requireUser, async (req, res, next) => {
+  try {
+    const courseId = String(req.params?.courseId || '').trim();
+    if (!courseId) return sendApiError(res, 400, 'INVALID_REQUEST');
+
+    const quota = await getCourseQuota({ userId: req.user.id, courseId });
+    return res.json({ courseId, limit: quota.limit, used: quota.used, remaining: quota.remaining });
+  } catch (error) {
+    if (error?.status) {
+      return sendApiError(res, error.status, String(error.message || 'INTERNAL_ERROR'), { details: error.details });
+    }
     return next(error);
   }
 });

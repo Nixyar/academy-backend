@@ -14,6 +14,7 @@ import {
   saveCourseProgress,
 } from '../lib/courseProgress.js';
 import { ensureWorkspace } from '../lib/htmlWorkspace.js';
+import { consumeCourseQuota, getCourseQuota } from '../lib/courseQuota.js';
 
 const router = Router();
 
@@ -980,8 +981,16 @@ const enqueueJob = async ({ userId, mode, courseId, lessonId, instruction, lesso
 
   // If a job is ALREADY running and NOT stale, don't start a new one
   if (isActiveJobRunning(activeJob) && !isStale) {
-    return { jobId: activeJob.jobId, already_running: true, courseId: resolvedCourseId };
+    let quota = null;
+    try {
+      quota = await getCourseQuota({ userId, courseId: resolvedCourseId });
+    } catch {
+      quota = null;
+    }
+    return { jobId: activeJob.jobId, already_running: true, courseId: resolvedCourseId, quota };
   }
+
+  const quota = await consumeCourseQuota({ userId, courseId: resolvedCourseId, amount: 1 });
 
   const jobId = randomUUID();
   const nowIso = new Date().toISOString();
@@ -1031,7 +1040,7 @@ const enqueueJob = async ({ userId, mode, courseId, lessonId, instruction, lesso
   // Background heartbeat (optional, but keep for consistency)
   void heartbeatActiveJob(job, { status: 'queued' }).catch(() => { });
 
-  return { jobId, already_running: false, courseId: resolvedCourseId };
+  return { jobId, already_running: false, courseId: resolvedCourseId, quota };
 };
 
 router.post('/start', requireUser, async (req, res, next) => {
@@ -1067,7 +1076,7 @@ router.post('/start', requireUser, async (req, res, next) => {
 	      return sendApiError(res, 400, 'INVALID_REQUEST');
 	    }
 
-    const { jobId } = await enqueueJob({
+    const { jobId, quota } = await enqueueJob({
       userId: user.id,
       mode,
       courseId: requestedCourseId || lessonData?.lesson?.course_id || null,
@@ -1082,7 +1091,16 @@ router.post('/start', requireUser, async (req, res, next) => {
       console.warn(`[slow-start-request] jobId=${jobId} took ${elapsed}ms for user ${user.id}`);
     }
 
-    return res.json({ jobId });
+    const publicQuota = quota
+      ? {
+        courseId: quota.courseId,
+        limit: quota.limit,
+        used: quota.used,
+        remaining: quota.remaining,
+      }
+      : null;
+
+    return res.json({ jobId, quota: publicQuota });
 	  } catch (e) {
 	    console.error('[start-error]', e);
 	    if (e?.status) {

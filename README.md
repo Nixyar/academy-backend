@@ -140,9 +140,22 @@ create table if not exists public.profiles (
 Use Row Level Security policies as needed; the API uses the service role key for server-side access.
 
 Courses/lessons tables (minimal fields expected by the API):
-- `courses`: `id uuid PK`, `slug text`, `title text`, `description text`, `cover_url text`, `access text`, `status text`, `sort_order int`, `created_at timestamptz`, `updated_at timestamptz`.
+- `courses`: `id uuid PK`, `slug text`, `title text`, `description text`, `cover_url text`, `access text`, `status text`, `sort_order int`, `llm_limit int (nullable = unlimited)`, `created_at timestamptz`, `updated_at timestamptz`.
 - `lessons`: `id uuid PK`, `course_id uuid`, `slug text`, `title text`, `lesson_type text`, `sort_order int`, `blocks jsonb`, `created_at timestamptz`, `updated_at timestamptz`.
 - `lessons` additionally needs `llm_system_prompt text` for the LLM endpoint.
+
+Course LLM quota table (per user per course):
+```sql
+-- See `academy-backend/sql/llm_course_quota.sql` for the full snippet.
+create table if not exists public.llm_course_quota (
+  user_id uuid references auth.users not null,
+  course_id uuid not null,
+  used int4 not null default 0,
+  limit int4,
+  updated_at timestamptz default now(),
+  primary key (user_id, course_id)
+);
+```
 
 Progress table for per-user course tracking:
 ```sql
