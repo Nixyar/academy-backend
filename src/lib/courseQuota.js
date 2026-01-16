@@ -14,15 +14,28 @@ const isMissingColumnError = (error, columnName) => {
 
 const isMissingTableError = (error, tableName) => {
   const message = error && typeof error === 'object' && 'message' in error ? String(error.message) : '';
+  const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
   const name = String(tableName || '').trim();
   if (!name) return false;
   return (
+    code === '42P01' ||
     message.includes(`relation \"${name}\" does not exist`) ||
     message.includes(`relation '${name}' does not exist`) ||
     message.includes(`relation ${name} does not exist`) ||
     message.includes(`Could not find the '${name}' table`) ||
-    message.includes(`could not find the '${name}' table`) ||
-    /does not exist/i.test(message)
+    message.includes(`could not find the '${name}' table`)
+  );
+};
+
+const isMissingFieldError = (error, fieldName) => {
+  const message = error && typeof error === 'object' && 'message' in error ? String(error.message) : '';
+  const name = String(fieldName || '').trim();
+  if (!name) return false;
+  return (
+    message.includes(`column \"${name}\"`) ||
+    message.includes(`column '${name}'`) ||
+    message.includes(`column ${name}`) ||
+    /does not exist|schema cache|could not find|not found/i.test(message)
   );
 };
 
@@ -65,12 +78,19 @@ async function fetchQuotaRow(userId, courseId) {
   const cid = normalizeId(courseId);
   if (!uid || !cid) throw Object.assign(new Error('INVALID_REQUEST'), { status: 400 });
 
-  const result = await supabaseAdmin
-    .from('llm_course_quota')
-    .select('user_id,course_id,used,limit,updated_at')
-    .eq('user_id', uid)
-    .eq('course_id', cid)
-    .maybeSingle();
+  const baseQuery = (selectFields) =>
+    supabaseAdmin
+      .from('llm_course_quota')
+      .select(selectFields)
+      .eq('user_id', uid)
+      .eq('course_id', cid)
+      .maybeSingle();
+
+  let result = await baseQuery('user_id,course_id,used,limit,updated_at');
+  if (result.error && isMissingFieldError(result.error, 'limit')) {
+    // Back-compat: older deployments may not have a per-row `limit` column.
+    result = await baseQuery('user_id,course_id,used,updated_at');
+  }
 
   if (result.error) {
     if (isMissingTableError(result.error, 'llm_course_quota')) {
@@ -85,7 +105,7 @@ async function fetchQuotaRow(userId, courseId) {
     user_id: uid,
     course_id: cid,
     used: toIntOrNull(result.data.used) ?? 0,
-    limit: toIntOrNull(result.data.limit),
+    limit: 'limit' in result.data ? toIntOrNull(result.data.limit) : null,
     updated_at: result.data.updated_at,
   };
 }
@@ -98,29 +118,40 @@ async function ensureQuotaRow(userId, courseId, limit) {
   const existing = await fetchQuotaRow(uid, cid);
   if (!existing) {
     const nowIso = new Date().toISOString();
-    const insert = await supabaseAdmin
+    const payloadBase = {
+      user_id: uid,
+      course_id: cid,
+      used: 0,
+      updated_at: nowIso,
+    };
+
+    // Prefer writing per-row limit, but tolerate missing column.
+    let insert = await supabaseAdmin
       .from('llm_course_quota')
-      .insert({
-        user_id: uid,
-        course_id: cid,
-        used: 0,
-        limit: limit == null ? null : Math.max(0, limit),
-        updated_at: nowIso,
-      });
+      .insert({ ...payloadBase, limit: limit == null ? null : Math.max(0, limit) });
+
+    if (insert.error && isMissingFieldError(insert.error, 'limit')) {
+      insert = await supabaseAdmin.from('llm_course_quota').insert(payloadBase);
+    }
 
     if (insert.error) {
       throw Object.assign(new Error('FAILED_TO_CREATE_COURSE_QUOTA'), { status: 500, details: insert.error });
     }
-  } else if (limit != null && existing.limit !== limit) {
-    const nowIso = new Date().toISOString();
+  } else if (limit != null && existing.limit != null && existing.limit !== limit) {
+    // Only sync per-row limit when the column exists (existing.limit != null)
+    const nowIsoUpdate = new Date().toISOString();
     const update = await supabaseAdmin
       .from('llm_course_quota')
-      .update({ limit, updated_at: nowIso })
+      .update({ limit, updated_at: nowIsoUpdate })
       .eq('user_id', uid)
       .eq('course_id', cid);
 
     if (update.error) {
-      throw Object.assign(new Error('FAILED_TO_UPDATE_COURSE_QUOTA'), { status: 500, details: update.error });
+      if (isMissingFieldError(update.error, 'limit')) {
+        // Older schema without per-row limit; ignore.
+      } else {
+        throw Object.assign(new Error('FAILED_TO_UPDATE_COURSE_QUOTA'), { status: 500, details: update.error });
+      }
     }
   }
 
@@ -187,7 +218,7 @@ export async function consumeCourseQuota({ userId, courseId, amount = 1 }) {
       .eq('user_id', uid)
       .eq('course_id', cid)
       .eq('used', used)
-      .select('used,limit')
+      .select('used')
       .maybeSingle();
 
     if (update.error) {
