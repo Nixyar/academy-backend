@@ -22,6 +22,20 @@ const JOB_TTL_MS = 20 * 60 * 1000;
 const jobs = new Map(); // Map<jobId, Job>
 const llmSemaphore = new Semaphore(env.llmMaxConcurrency);
 
+const DEFAULT_CSS_SYSTEM_SUFFIX = `
+CSS OUTPUT RULES:
+- Return only raw CSS.
+- No markdown, no code fences, no <style> tags.
+- Keep CSS reasonably compact and readable.
+`.trim();
+
+const DEFAULT_SECTION_SYSTEM_SUFFIX = `
+SECTION OUTPUT RULES (id={ID}):
+- Return ONLY a single <section id="{ID}">...</section> element.
+- No markdown, no code fences, no extra text.
+- Use semantic HTML and Tailwind classes when appropriate.
+`.trim();
+
 const parseLessonSettings = (lesson) => {
   const raw = lesson?.settings;
   if (!raw) return null;
@@ -1255,14 +1269,8 @@ router.get('/stream', requireUser, async (req, res, next) => {
       throw Object.assign(new Error('COURSE_ID_MISMATCH'), { status: 400, details: 'course mismatch' });
     }
     job.renderSystem = renderSystem;
-    const cssSystemSuffix = overrides?.cssSystemSuffix;
-    const sectionSystemSuffix = overrides?.sectionSystemSuffix;
-    if (!cssSystemSuffix) {
-      throw Object.assign(new Error('LESSON_LLM_CSS_SYSTEM_SUFFIX_MISSING'), { status: 400 });
-    }
-    if (!sectionSystemSuffix) {
-      throw Object.assign(new Error('LESSON_LLM_SECTION_SYSTEM_SUFFIX_MISSING'), { status: 400 });
-    }
+    const cssSystemSuffix = overrides?.cssSystemSuffix || DEFAULT_CSS_SYSTEM_SUFFIX;
+    const sectionSystemSuffix = overrides?.sectionSystemSuffix || DEFAULT_SECTION_SYSTEM_SUFFIX;
 
     const { progress: current } = await loadCourseProgress(job.userId, job.courseId);
     const workspace = ensureWorkspace(current);
