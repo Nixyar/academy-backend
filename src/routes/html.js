@@ -1496,7 +1496,12 @@ ${assembledSections.join('\n\n')}
     job.html = finalHtml;
 
     emitStatus(job, 'saving', 'saving progress', 0.96);
-    const saved = await completeActiveJob(job, 'done', { html: finalHtml });
+    // Create mode must overwrite any previous workspace (files/active_file) with the new site.
+    const saved = await completeActiveJob(job, 'done', {
+      files: { 'index.html': finalHtml },
+      active_file: 'index.html',
+      html: finalHtml,
+    });
     job.result = toWorkspaceResponse(saved);
     job.status = 'done';
     emitStatus(job, 'done', 'done', 1);
