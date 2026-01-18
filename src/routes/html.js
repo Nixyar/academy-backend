@@ -714,7 +714,7 @@ const fetchLessonPrompts = async (lessonId, opts = {}) => {
 
   const { data: lesson, error } = await supabaseAdmin
     .from('lessons')
-    .select('id,settings')
+    .select('id,course_id,settings')
     .eq('id', lessonId)
     .maybeSingle();
 
@@ -1070,25 +1070,25 @@ router.post('/start', requireUser, async (req, res, next) => {
         : (typeof body.prompt === 'string' ? body.prompt.trim() : '');
     const { user } = req;
 
-	    if (!['create', 'edit', 'add_page'].includes(mode)) {
-	      return sendApiError(res, 400, 'INVALID_MODE');
-	    }
+    if (!['create', 'edit', 'add_page'].includes(mode)) {
+      return sendApiError(res, 400, 'INVALID_MODE');
+    }
 
-	    if (!instruction) {
-	      return sendApiError(res, 400, 'INVALID_REQUEST');
-	    }
+    if (!instruction) {
+      return sendApiError(res, 400, 'INVALID_REQUEST');
+    }
 
     let lessonData = null;
     if (lessonId) {
       // Fetch lesson once and reuse it
       lessonData = await fetchLessonPrompts(lessonId);
       const derivedCourseId = lessonData.lesson.course_id;
-	      if (mode === 'create' && requestedCourseId && requestedCourseId !== derivedCourseId) {
-	        return sendApiError(res, 400, 'COURSE_ID_MISMATCH');
-	      }
-	    } else if (mode === 'create') {
-	      return sendApiError(res, 400, 'INVALID_REQUEST');
-	    }
+      if (mode === 'create' && requestedCourseId && requestedCourseId !== derivedCourseId) {
+        return sendApiError(res, 400, 'COURSE_ID_MISMATCH');
+      }
+    } else if (mode === 'create') {
+      return sendApiError(res, 400, 'INVALID_REQUEST');
+    }
 
     const { jobId, quota } = await enqueueJob({
       userId: user.id,
@@ -1115,29 +1115,29 @@ router.post('/start', requireUser, async (req, res, next) => {
       : null;
 
     return res.json({ jobId, quota: publicQuota });
-	  } catch (e) {
-	    console.error('[start-error]', e);
-	    if (e?.status) {
-	      return sendApiError(res, e.status, String(e.message || 'INTERNAL_ERROR'), { details: e.details });
-	    }
-	    return next(e);
-	  }
-	});
+  } catch (e) {
+    console.error('[start-error]', e);
+    if (e?.status) {
+      return sendApiError(res, e.status, String(e.message || 'INTERNAL_ERROR'), { details: e.details });
+    }
+    return next(e);
+  }
+});
 
 router.post('/edit', requireUser, async (req, res, next) => {
   try {
     const { courseId, instruction, lessonId } = req.body || {};
     const { user } = req;
 
-	    if (typeof courseId !== 'string' || !courseId.trim()) {
-	      return sendApiError(res, 400, 'INVALID_REQUEST');
-	    }
-	    if (typeof instruction !== 'string' || !instruction.trim()) {
-	      return sendApiError(res, 400, 'INVALID_REQUEST');
-	    }
-	    if (typeof lessonId !== 'string' || !lessonId.trim()) {
-	      return sendApiError(res, 400, 'INVALID_REQUEST');
-	    }
+    if (typeof courseId !== 'string' || !courseId.trim()) {
+      return sendApiError(res, 400, 'INVALID_REQUEST');
+    }
+    if (typeof instruction !== 'string' || !instruction.trim()) {
+      return sendApiError(res, 400, 'INVALID_REQUEST');
+    }
+    if (typeof lessonId !== 'string' || !lessonId.trim()) {
+      return sendApiError(res, 400, 'INVALID_REQUEST');
+    }
 
     const { jobId } = await enqueueJob({
       userId: user.id,
@@ -1148,31 +1148,31 @@ router.post('/edit', requireUser, async (req, res, next) => {
     });
 
     return res.json({ jobId });
-	  } catch (error) {
-	    if (error.message === 'FAILED_TO_FETCH_PROGRESS') {
-	      return sendApiError(res, 500, 'FAILED_TO_FETCH_PROGRESS');
-	    }
-	    if (error.message === 'FAILED_TO_SAVE_PROGRESS') {
-	      return sendApiError(res, 500, 'FAILED_TO_SAVE_PROGRESS');
-	    }
-	    return next(error);
-	  }
-	});
+  } catch (error) {
+    if (error.message === 'FAILED_TO_FETCH_PROGRESS') {
+      return sendApiError(res, 500, 'FAILED_TO_FETCH_PROGRESS');
+    }
+    if (error.message === 'FAILED_TO_SAVE_PROGRESS') {
+      return sendApiError(res, 500, 'FAILED_TO_SAVE_PROGRESS');
+    }
+    return next(error);
+  }
+});
 
 router.post('/add-page', requireUser, async (req, res, next) => {
   try {
     const { courseId, instruction, lessonId } = req.body || {};
     const { user } = req;
 
-	    if (typeof courseId !== 'string' || !courseId.trim()) {
-	      return sendApiError(res, 400, 'INVALID_REQUEST');
-	    }
-	    if (typeof instruction !== 'string' || !instruction.trim()) {
-	      return sendApiError(res, 400, 'INVALID_REQUEST');
-	    }
-	    if (typeof lessonId !== 'string' || !lessonId.trim()) {
-	      return sendApiError(res, 400, 'INVALID_REQUEST');
-	    }
+    if (typeof courseId !== 'string' || !courseId.trim()) {
+      return sendApiError(res, 400, 'INVALID_REQUEST');
+    }
+    if (typeof instruction !== 'string' || !instruction.trim()) {
+      return sendApiError(res, 400, 'INVALID_REQUEST');
+    }
+    if (typeof lessonId !== 'string' || !lessonId.trim()) {
+      return sendApiError(res, 400, 'INVALID_REQUEST');
+    }
 
     const { jobId } = await enqueueJob({
       userId: user.id,
@@ -1183,16 +1183,16 @@ router.post('/add-page', requireUser, async (req, res, next) => {
     });
 
     return res.json({ jobId });
-	  } catch (error) {
-	    if (error.message === 'FAILED_TO_FETCH_PROGRESS') {
-	      return sendApiError(res, 500, 'FAILED_TO_FETCH_PROGRESS');
-	    }
-	    if (error.message === 'FAILED_TO_SAVE_PROGRESS') {
-	      return sendApiError(res, 500, 'FAILED_TO_SAVE_PROGRESS');
-	    }
-	    return next(error);
-	  }
-	});
+  } catch (error) {
+    if (error.message === 'FAILED_TO_FETCH_PROGRESS') {
+      return sendApiError(res, 500, 'FAILED_TO_FETCH_PROGRESS');
+    }
+    if (error.message === 'FAILED_TO_SAVE_PROGRESS') {
+      return sendApiError(res, 500, 'FAILED_TO_SAVE_PROGRESS');
+    }
+    return next(error);
+  }
+});
 
 router.get('/stream', requireUser, async (req, res, next) => {
   let pingInterval;
