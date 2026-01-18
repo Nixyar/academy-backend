@@ -76,19 +76,6 @@ const ensureLessonNode = (progress, lessonId) => {
   return nextLessons;
 };
 
-const isMissingRpcFunctionError = (rpcError) => {
-  if (!rpcError) return false;
-  const code = typeof rpcError.code === 'string' ? rpcError.code : '';
-  const message = typeof rpcError.message === 'string' ? rpcError.message : '';
-  const combined = `${code} ${message}`.toLowerCase();
-  return (
-    combined.includes('pgrst202') ||
-    combined.includes('could not find the function') ||
-    combined.includes('schema cache') ||
-    combined.includes('set_lesson_prompt') && combined.includes('does not exist')
-  );
-};
-
 const applyPatch = (progress, patch) => {
   const next = normalizeProgress(progress);
   const op = patch?.op;
@@ -368,54 +355,6 @@ router.patch('/courses/:courseId/progress', requireUser, async (req, res, next) 
 
     if (!op) {
       return sendApiError(res, 400, 'INVALID_PATCH');
-    }
-
-    if (op === 'lesson_prompt') {
-      const { lessonId, prompt } = patch;
-
-      if (typeof lessonId !== 'string' || !lessonId.trim() || typeof prompt !== 'string' || !prompt.trim()) {
-        return res
-          .status(400)
-          .json({ error: 'INVALID_PATCH', details: 'lesson_prompt requires lessonId and prompt' });
-      }
-
-      const { error: rpcError } = await supabaseAdmin.rpc('set_lesson_prompt', {
-        p_user_id: user.id,
-        p_course_id: courseId,
-        p_lesson_id: lessonId,
-        p_prompt: prompt.trim(),
-      });
-
-      if (rpcError) {
-        // eslint-disable-next-line no-console
-        console.error('[progress-lesson-prompt-error]', {
-          userId: user.id,
-          courseId,
-          lessonId,
-          rpcError,
-        });
-
-        // If the RPC isn't deployed, fall back to the JSON patch path.
-        if (isMissingRpcFunctionError(rpcError)) {
-          const { progress: current } = await loadCourseProgress(user.id, courseId);
-          const result = applyPatch(current, { op: 'lesson_prompt', lessonId, prompt });
-          if (result.error) {
-            return sendApiError(res, 400, String(result.error || 'INVALID_PATCH'), { details: result.details });
-          }
-          const { progress: saved, updatedAt } = await saveCourseProgress(user.id, courseId, result.progress);
-          return res.json({ courseId, progress: saved, updatedAt });
-        }
-
-        return sendApiError(res, 500, 'FAILED_TO_SAVE_LESSON_PROMPT', { details: rpcError.message });
-      }
-
-      const { progress: saved, updatedAt } = await loadCourseProgress(user.id, courseId);
-
-      return res.json({
-        courseId,
-        progress: saved,
-        updatedAt,
-      });
     }
 
     const { progress: current } = await loadCourseProgress(user.id, courseId);
