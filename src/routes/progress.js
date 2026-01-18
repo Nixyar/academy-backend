@@ -76,6 +76,19 @@ const ensureLessonNode = (progress, lessonId) => {
   return nextLessons;
 };
 
+const isMissingRpcFunctionError = (rpcError) => {
+  if (!rpcError) return false;
+  const code = typeof rpcError.code === 'string' ? rpcError.code : '';
+  const message = typeof rpcError.message === 'string' ? rpcError.message : '';
+  const combined = `${code} ${message}`.toLowerCase();
+  return (
+    combined.includes('pgrst202') ||
+    combined.includes('could not find the function') ||
+    combined.includes('schema cache') ||
+    combined.includes('set_lesson_prompt') && combined.includes('does not exist')
+  );
+};
+
 const applyPatch = (progress, patch) => {
   const next = normalizeProgress(progress);
   const op = patch?.op;
@@ -167,6 +180,36 @@ const applyPatch = (progress, patch) => {
         ...next,
         lessons,
         last_viewed_lesson_id: lessonId,
+      },
+    };
+  }
+
+  if (op === 'lesson_prompt') {
+    const { lessonId, prompt } = patch;
+
+    if (typeof lessonId !== 'string' || !lessonId.trim() || typeof prompt !== 'string' || !prompt.trim()) {
+      return { error: 'INVALID_PATCH', details: 'lesson_prompt requires lessonId and prompt' };
+    }
+
+    const resolvedLessonId = lessonId.trim();
+    const trimmedPrompt = prompt.trim();
+    const lessons = ensureLessonNode(next, resolvedLessonId);
+    const lesson = lessons[resolvedLessonId];
+
+    lessons[resolvedLessonId] = {
+      ...lesson,
+      lesson_prompt: trimmedPrompt,
+      // Backwards compatibility with older clients that read `prompt`
+      prompt: trimmedPrompt,
+      status: lesson.status || 'in_progress',
+      last_viewed_at: new Date().toISOString(),
+    };
+
+    return {
+      progress: {
+        ...next,
+        lessons,
+        last_viewed_lesson_id: resolvedLessonId,
       },
     };
   }
@@ -351,6 +394,18 @@ router.patch('/courses/:courseId/progress', requireUser, async (req, res, next) 
           lessonId,
           rpcError,
         });
+
+        // If the RPC isn't deployed, fall back to the JSON patch path.
+        if (isMissingRpcFunctionError(rpcError)) {
+          const { progress: current } = await loadCourseProgress(user.id, courseId);
+          const result = applyPatch(current, { op: 'lesson_prompt', lessonId, prompt });
+          if (result.error) {
+            return sendApiError(res, 400, String(result.error || 'INVALID_PATCH'), { details: result.details });
+          }
+          const { progress: saved, updatedAt } = await saveCourseProgress(user.id, courseId, result.progress);
+          return res.json({ courseId, progress: saved, updatedAt });
+        }
+
         return sendApiError(res, 500, 'FAILED_TO_SAVE_LESSON_PROMPT', { details: rpcError.message });
       }
 
