@@ -344,6 +344,13 @@ router.patch('/courses/:courseId/progress', requireUser, async (req, res, next) 
       });
 
       if (rpcError) {
+        // eslint-disable-next-line no-console
+        console.error('[progress-lesson-prompt-error]', {
+          userId: user.id,
+          courseId,
+          lessonId,
+          rpcError,
+        });
         return sendApiError(res, 500, 'FAILED_TO_SAVE_LESSON_PROMPT', { details: rpcError.message });
       }
 

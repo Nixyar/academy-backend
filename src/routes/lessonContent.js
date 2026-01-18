@@ -48,7 +48,7 @@ router.get('/:lessonId/content', async (req, res, next) => {
       const supabase = getSupabaseClientForRequest(req) ?? supabaseAnon;
       const { data, error } = await supabase
         .from('lesson_content')
-        .select('blocks, settings, unlock_rule, content_hash')
+        .select('blocks, content_hash')
         .eq('lesson_id', lessonId)
         .single();
 
@@ -64,8 +64,6 @@ router.get('/:lessonId/content', async (req, res, next) => {
       const etag = `"lesson:${lessonId}:${contentHash}"`;
       const payload = {
         blocks: data?.blocks ?? null,
-        settings: data?.settings ?? null,
-        unlock_rule: data?.unlock_rule ?? null,
       };
 
       lessonContentCache.set(lessonId, { etag, payload, expiresAt: Date.now() + TTL_MS });
