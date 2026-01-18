@@ -31,15 +31,20 @@ router.get('/:lessonId/content', async (req, res, next) => {
     const lessonId = normalizeParam(req.params?.lessonId);
     if (!lessonId) return sendApiError(res, 400, 'INVALID_REQUEST');
 
+    const bypassCache =
+      req.query?.bust !== undefined ||
+      String(getHeaderString(req.headers['cache-control'])).toLowerCase().includes('no-cache') ||
+      String(getHeaderString(req.headers['cache-control'])).toLowerCase().includes('no-store');
+
     const cached = lessonContentCache.get(lessonId);
-    if (cached && cached.expiresAt > Date.now()) {
+    if (!bypassCache && cached && cached.expiresAt > Date.now()) {
       return replyWithEtag(req, res, cached.etag, cached.payload);
     } else if (cached) {
       lessonContentCache.delete(lessonId);
     }
 
     const inflight = lessonContentInFlight.get(lessonId);
-    if (inflight) {
+    if (!bypassCache && inflight) {
       const data = await inflight;
       return replyWithEtag(req, res, data.etag, data.payload);
     }
@@ -48,7 +53,7 @@ router.get('/:lessonId/content', async (req, res, next) => {
       const supabase = getSupabaseClientForRequest(req) ?? supabaseAnon;
       const { data, error } = await supabase
         .from('lesson_content')
-        .select('blocks, content_hash')
+        .select('blocks, settings, unlock_rule, content_hash, updated_at')
         .eq('lesson_id', lessonId)
         .single();
 
@@ -61,21 +66,30 @@ router.get('/:lessonId/content', async (req, res, next) => {
       }
 
       const contentHash = data?.content_hash ?? '';
-      const etag = `"lesson:${lessonId}:${contentHash}"`;
+      const updatedAt = data?.updated_at ? String(data.updated_at) : '';
+      const etag = `"lesson:${lessonId}:${contentHash}:${updatedAt}"`;
       const payload = {
         blocks: data?.blocks ?? null,
+        settings: data?.settings ?? null,
+        unlock_rule: data?.unlock_rule ?? null,
       };
 
-      lessonContentCache.set(lessonId, { etag, payload, expiresAt: Date.now() + TTL_MS });
+      if (!bypassCache) {
+        lessonContentCache.set(lessonId, { etag, payload, expiresAt: Date.now() + TTL_MS });
+      }
       return { etag, payload };
     })();
 
-    lessonContentInFlight.set(lessonId, promise);
+    if (!bypassCache) {
+      lessonContentInFlight.set(lessonId, promise);
+    }
     try {
       const data = await promise;
       return replyWithEtag(req, res, data.etag, data.payload);
     } finally {
-      lessonContentInFlight.delete(lessonId);
+      if (!bypassCache) {
+        lessonContentInFlight.delete(lessonId);
+      }
     }
   } catch (e) {
     if (e && typeof e === 'object' && 'status' in e && Number(e.status) === 404) {
