@@ -81,6 +81,22 @@ const isPaidStatus = (status) => {
   return ['paid', 'succeeded', 'success', 'completed', 'captured', 'confirmed'].includes(normalized);
 };
 
+const FINAL_NON_PAID_STATUSES = new Set([
+  'failed',
+  'rejected',
+  'canceled',
+  'cancelled',
+  'refunded',
+  'expired',
+  'dead',
+  'timeout',
+]);
+
+const isFinalStatus = (status) => {
+  const normalized = normalizeStatus(status);
+  return isPaidStatus(normalized) || FINAL_NON_PAID_STATUSES.has(normalized);
+};
+
 const isLikelyPaidTbankStatus = (status) => {
   const normalized = normalizeStatus(status);
   return ['confirmed', 'paid'].includes(normalized);
@@ -91,6 +107,76 @@ const isInvalidTokenResponse = (json) => {
   const errorCode = String(json.ErrorCode || json.errorCode || '').trim();
   const details = String(json.Details || json.details || '').toLowerCase();
   return errorCode === '204' && details.includes('токен');
+};
+
+const RECONCILE_LOCK_PREFIX = 'reconciling';
+const RECONCILE_LOCK_TTL_MS = 10 * 60 * 1000;
+
+const buildReconcileLockValue = (prevStatus) => {
+  const ts = Date.now();
+  const nonce = crypto.randomBytes(6).toString('hex');
+  const prev = String(prevStatus || '').trim().replaceAll(':', '_') || 'unknown';
+  return `${RECONCILE_LOCK_PREFIX}:${ts}:${nonce}:${prev}`;
+};
+
+const parseReconcileLock = (status) => {
+  const raw = String(status || '').trim();
+  if (!raw.startsWith(`${RECONCILE_LOCK_PREFIX}:`)) return null;
+  const parts = raw.split(':');
+  const ts = Number(parts[1]);
+  const prev = parts.slice(3).join(':') || 'unknown';
+  if (!Number.isFinite(ts)) return { ts: null, prev, raw };
+  return { ts, prev, raw };
+};
+
+const fetchTbankPaymentState = async (paymentId) => {
+  if (!paymentId) throw new Error('PAYMENT_ID_REQUIRED');
+  const statePayload = {
+    TerminalKey: env.tbankTerminalKey,
+    PaymentId: paymentId,
+  };
+  const tokenModes = ['password_key', 'append_password', 'key_value'];
+
+  let json = null;
+  let responseText = null;
+  let okResponse = null;
+
+  for (const mode of tokenModes) {
+    const Token = createTbankTokenExcluding(statePayload, env.tbankPassword, { mode });
+    const response = await fetchWithTimeout(getApiUrl('/GetState'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...statePayload, Token }),
+    }, {
+      name: 'tbank-get-state',
+      timeoutMs: env.tbankTimeoutMs,
+      slowMs: env.externalSlowLogMs,
+      logger: (event, data) => console.warn(`[${event}]`, data),
+    });
+
+    const parsed = await readTbankJsonSafe(response);
+    json = parsed.json;
+    responseText = parsed.text;
+    okResponse = response;
+    if (response.ok && json && !isInvalidTokenResponse(json)) {
+      break;
+    }
+  }
+
+  if (!okResponse || !okResponse.ok || !json) {
+    const error = new Error('PAYMENT_PROVIDER_ERROR');
+    error.details = {
+      status: okResponse ? okResponse.status : null,
+      statusText: okResponse ? okResponse.statusText : null,
+      body: json,
+      bodyText: responseText || null,
+    };
+    throw error;
+  }
+
+  const tbankStatusRaw = json.Status || json.status || 'unknown';
+  const tbankStatus = normalizeStatus(tbankStatusRaw);
+  return { status: tbankStatus, raw: json };
 };
 
 const isMissingRelationError = (error) => {
@@ -114,71 +200,32 @@ const isOnConflictConstraintError = (error) => {
 const grantUserCourse = async ({ userId, courseId, purchaseId, status }) => {
   const grantedAt = new Date().toISOString();
   try {
+    const payload = {
+      user_id: userId,
+      course_id: courseId,
+      purchase_id: purchaseId,
+      status: status || 'active',
+      granted_at: grantedAt,
+    };
+
     const { error } = await supabaseAdmin
       .from('user_courses')
-      .upsert(
-        {
-          user_id: userId,
-          course_id: courseId,
-          purchase_id: purchaseId,
-          status: status || 'active',
-          granted_at: grantedAt,
-        },
-        { onConflict: 'user_id,course_id' },
-      );
+      .insert(payload, { onConflict: 'user_id,course_id', ignoreDuplicates: true });
 
     if (!error) return true;
     if (isMissingRelationError(error)) return false;
 
-    // Fallback if the table doesn't have a unique constraint for (user_id, course_id).
+    // Fallback if the unique constraint isn't present: keep prior "upsert/update" behaviour.
     if (isOnConflictConstraintError(error)) {
-      const { data: existing, error: selectError } = await supabaseAdmin
+      const { error: fallbackError } = await supabaseAdmin
         .from('user_courses')
-        .select('id')
-        .eq('user_id', userId)
-        .eq('course_id', courseId)
-        .maybeSingle();
-
-      if (selectError && !isMissingRelationError(selectError)) {
-        console.error('[user-courses-select-failed]', { message: selectError.message });
-        return false;
-      }
-
-      if (existing?.id) {
-        const { error: updateError } = await supabaseAdmin
-          .from('user_courses')
-          .update({
-            purchase_id: purchaseId,
-            status: status || 'active',
-            granted_at: grantedAt,
-          })
-          .eq('id', existing.id);
-
-        if (updateError) {
-          console.error('[user-courses-update-failed]', { message: updateError.message });
-          return false;
-        }
-        return true;
-      }
-
-      const { error: insertError } = await supabaseAdmin
-        .from('user_courses')
-        .insert({
-          user_id: userId,
-          course_id: courseId,
-          purchase_id: purchaseId,
-          status: status || 'active',
-          granted_at: grantedAt,
-        });
-
-      if (insertError) {
-        console.error('[user-courses-insert-failed]', { message: insertError.message });
-        return false;
-      }
-      return true;
+        .upsert(payload, { onConflict: 'user_id,course_id' });
+      if (!fallbackError) return true;
+      console.error('[user-courses-upsert-failed]', { message: normalizeSupabaseErrorMessage(fallbackError) });
+      return false;
     }
 
-    console.error('[user-courses-upsert-failed]', { message: normalizeSupabaseErrorMessage(error) });
+    console.error('[user-courses-insert-failed]', { message: normalizeSupabaseErrorMessage(error) });
     return false;
   } catch (err) {
     console.error('[user-courses-upsert-crash]', { error: err instanceof Error ? err.message : String(err) });
@@ -469,23 +516,45 @@ router.post('/tbank/notification', async (req, res, next) => {
     if (!orderId) return sendApiError(res, 400, 'INVALID_REQUEST');
     console.info('[tbank-notification]', { orderId, paymentId, status });
 
-    const updates = {
-      status: status || 'unknown',
-      payment_id: paymentId,
-      ...(isPaidStatus(status)
-        ? { paid_at: new Date().toISOString() }
-        : {}),
-    };
+    const normalizedStatus = status || 'unknown';
+    const paid = isPaidStatus(normalizedStatus) || isLikelyPaidTbankStatus(normalizedStatus);
 
-    const { data: updated, error: updateError } = await supabaseAdmin
+    const finalStatusesFilter = `(${[...FINAL_NON_PAID_STATUSES, ...['paid', 'succeeded', 'success', 'completed', 'captured', 'confirmed']]
+      .map((s) => `"${s}"`)
+      .join(',')})`;
+
+    if (paid) {
+      // 1) If the row is still non-final, write both status + paid_at atomically (paid_at only when NULL).
+      await supabaseAdmin
+        .from('course_purchases')
+        .update({ paid_at: new Date().toISOString(), payment_id: paymentId, status: normalizedStatus })
+        .eq('order_id', orderId)
+        .is('paid_at', null)
+        .not('status', 'in', finalStatusesFilter);
+
+      // 2) If status is already final-paid but paid_at is missing, fill paid_at without changing status.
+      await supabaseAdmin
+        .from('course_purchases')
+        .update({ paid_at: new Date().toISOString(), payment_id: paymentId })
+        .eq('order_id', orderId)
+        .is('paid_at', null)
+        .in('status', ['paid', 'succeeded', 'success', 'completed', 'captured', 'confirmed']);
+    }
+
+    await supabaseAdmin
       .from('course_purchases')
-      .update(updates)
+      .update({ status: normalizedStatus, payment_id: paymentId })
       .eq('order_id', orderId)
+      .not('status', 'in', finalStatusesFilter);
+
+    const { data: updated, error: selectError } = await supabaseAdmin
+      .from('course_purchases')
       .select('id,user_id,course_id,status,paid_at')
+      .eq('order_id', orderId)
       .maybeSingle();
 
-    if (updateError) {
-      console.error('[tbank-notification-update-failed]', { message: updateError.message });
+    if (selectError) {
+      console.error('[tbank-notification-select-failed]', { message: selectError.message });
       return sendApiError(res, 500, 'INTERNAL_ERROR');
     }
 
@@ -534,61 +603,50 @@ router.post('/tbank/sync', requireUser, async (req, res, next) => {
       return res.json({ status: purchase.status, courseId: purchase.course_id, paidAt: purchase.paid_at });
     }
 
-    const statePayload = {
-      TerminalKey: env.tbankTerminalKey,
-      PaymentId: purchase.payment_id,
-    };
-    const tokenModes = ['password_key', 'append_password', 'key_value'];
-    let json = null;
-    let responseText = null;
-    let okResponse = null;
-
-    for (const mode of tokenModes) {
-      const Token = createTbankTokenExcluding(statePayload, env.tbankPassword, { mode });
-      const response = await fetchWithTimeout(getApiUrl('/GetState'), {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ ...statePayload, Token }),
-      }, {
-        name: 'tbank-get-state',
-        timeoutMs: env.tbankTimeoutMs,
-        slowMs: env.externalSlowLogMs,
-        logger: (event, data) => console.warn(`[${event}]`, data),
-      });
-
-      const parsed = await readTbankJsonSafe(response);
-      json = parsed.json;
-      responseText = parsed.text;
-      okResponse = response;
-      if (response.ok && json && !isInvalidTokenResponse(json)) {
-        break;
-      }
-    }
-
-    if (!okResponse || !okResponse.ok || !json) {
+    let tbankStatus = 'unknown';
+    try {
+      const state = await fetchTbankPaymentState(purchase.payment_id);
+      tbankStatus = state.status || 'unknown';
+    } catch (err) {
       console.error('[tbank-get-state-failed]', {
-        status: okResponse ? okResponse.status : null,
-        statusText: okResponse ? okResponse.statusText : null,
-        body: json,
-        bodyText: responseText || null,
+        message: err instanceof Error ? err.message : String(err),
+        details: err && typeof err === 'object' && 'details' in err ? err.details : null,
       });
       return sendApiError(res, 502, 'PAYMENT_PROVIDER_ERROR');
     }
 
-    const tbankStatusRaw = json.Status || json.status || purchase.status || 'unknown';
-    const tbankStatus = normalizeStatus(tbankStatusRaw);
     const paidAt =
       isLikelyPaidTbankStatus(tbankStatus) || isPaidStatus(tbankStatus)
         ? (purchase.paid_at || new Date().toISOString())
         : purchase.paid_at;
 
+    const finalStatusesFilter = `(${[...FINAL_NON_PAID_STATUSES, ...['paid', 'succeeded', 'success', 'completed', 'captured', 'confirmed']]
+      .map((s) => `"${s}"`)
+      .join(',')})`;
+
+    if (paidAt && !purchase.paid_at) {
+      // 1) If the row is still non-final, write both status + paid_at atomically (paid_at only when NULL).
+      await supabaseAdmin
+        .from('course_purchases')
+        .update({ paid_at: paidAt, status: tbankStatus })
+        .eq('id', purchase.id)
+        .is('paid_at', null)
+        .not('status', 'in', finalStatusesFilter);
+
+      // 2) If status is already final-paid but paid_at is missing, fill paid_at without changing status.
+      await supabaseAdmin
+        .from('course_purchases')
+        .update({ paid_at: paidAt })
+        .eq('id', purchase.id)
+        .is('paid_at', null)
+        .in('status', ['paid', 'succeeded', 'success', 'completed', 'captured', 'confirmed']);
+    }
+
     await supabaseAdmin
       .from('course_purchases')
-      .update({
-        status: tbankStatus,
-        paid_at: paidAt,
-      })
-      .eq('id', purchase.id);
+      .update({ status: tbankStatus })
+      .eq('id', purchase.id)
+      .not('status', 'in', finalStatusesFilter);
 
     if (paidAt || isPaidStatus(tbankStatus)) {
       await grantUserCourse({
@@ -604,5 +662,151 @@ router.post('/tbank/sync', requireUser, async (req, res, next) => {
     return next(error);
   }
 });
+
+export const startTbankPurchaseReconciler = () => {
+  if (!isConfigured()) return null;
+
+  const intervalMs = Math.max(10_000, Number(env.tbankReconcileIntervalMs) || 120_000);
+  const lookbackHours = Math.max(1, Number(env.tbankReconcileLookbackHours) || 168);
+  const batchSize = Math.min(200, Math.max(1, Number(env.tbankReconcileBatchSize) || 50));
+  let running = false;
+
+  const reconcileOnce = async () => {
+    if (running) return;
+    running = true;
+    try {
+      const sinceIso = new Date(Date.now() - lookbackHours * 60 * 60 * 1000).toISOString();
+      const finalStatusesFilter = `(${[...FINAL_NON_PAID_STATUSES, ...['paid', 'succeeded', 'success', 'completed', 'captured', 'confirmed']]
+        .map((s) => `"${s}"`)
+        .join(',')})`;
+
+      const { data: purchases, error } = await supabaseAdmin
+        .from('course_purchases')
+        .select('id,user_id,course_id,status,payment_id,paid_at,created_at')
+        .eq('provider', 'tbank')
+        .is('paid_at', null)
+        .not('status', 'in', finalStatusesFilter)
+        .gte('created_at', sinceIso)
+        .order('created_at', { ascending: false })
+        .limit(batchSize);
+
+      if (error) {
+        console.error('[tbank-reconcile-select-failed]', { message: error.message });
+        return;
+      }
+
+      const items = Array.isArray(purchases) ? purchases : [];
+      for (const purchase of items) {
+        const paymentId = String(purchase?.payment_id || '').trim();
+        if (!paymentId) continue;
+
+        const existingStatus = String(purchase?.status || '').trim();
+        if (isFinalStatus(existingStatus)) continue;
+
+        const lockParsed = parseReconcileLock(existingStatus);
+        if (lockParsed && lockParsed.ts && Date.now() - lockParsed.ts < RECONCILE_LOCK_TTL_MS) {
+          continue;
+        }
+
+        const lockValue = buildReconcileLockValue(lockParsed?.prev || existingStatus);
+        if (lockParsed) {
+          const { data: lockRows } = await supabaseAdmin
+            .from('course_purchases')
+            .update({ status: lockValue })
+            .eq('id', purchase.id)
+            .eq('status', lockParsed.raw)
+            .is('paid_at', null)
+            .select('id');
+          if (!Array.isArray(lockRows) || lockRows.length === 0) continue;
+        } else {
+          const { data: lockRows } = await supabaseAdmin
+            .from('course_purchases')
+            .update({ status: lockValue })
+            .eq('id', purchase.id)
+            .is('paid_at', null)
+            .not('status', 'like', `${RECONCILE_LOCK_PREFIX}:%`)
+            .not('status', 'in', finalStatusesFilter)
+            .select('id');
+          if (!Array.isArray(lockRows) || lockRows.length === 0) continue;
+        }
+
+        let tbankStatus = null;
+        try {
+          const state = await fetchTbankPaymentState(paymentId);
+          tbankStatus = state.status || 'unknown';
+        } catch (err) {
+          console.error('[tbank-reconcile-get-state-failed]', {
+            purchaseId: purchase?.id,
+            message: err instanceof Error ? err.message : String(err),
+          });
+          const fallbackStatus = lockParsed?.prev || existingStatus || 'new';
+          await supabaseAdmin
+            .from('course_purchases')
+            .update({ status: fallbackStatus })
+            .eq('id', purchase.id)
+            .eq('status', lockValue)
+            .is('paid_at', null);
+          continue;
+        }
+
+        const paidAt =
+          isLikelyPaidTbankStatus(tbankStatus) || isPaidStatus(tbankStatus)
+            ? (purchase.paid_at || new Date().toISOString())
+            : purchase.paid_at;
+
+        if (paidAt && !purchase.paid_at) {
+          await supabaseAdmin
+            .from('course_purchases')
+            .update({
+              paid_at: paidAt,
+              status: tbankStatus,
+            })
+            .eq('id', purchase.id)
+            .eq('status', lockValue)
+            .is('paid_at', null);
+        }
+
+        await supabaseAdmin
+          .from('course_purchases')
+          .update({ status: tbankStatus })
+          .eq('id', purchase.id)
+          .eq('status', lockValue)
+          .not('status', 'in', finalStatusesFilter);
+
+        if (!paidAt && !isPaidStatus(tbankStatus)) {
+          const fallbackStatus = lockParsed?.prev || existingStatus || 'new';
+          await supabaseAdmin
+            .from('course_purchases')
+            .update({ status: fallbackStatus })
+            .eq('id', purchase.id)
+            .eq('status', lockValue)
+            .is('paid_at', null)
+            .not('status', 'in', finalStatusesFilter);
+        }
+
+        if (paidAt || isPaidStatus(tbankStatus)) {
+          await grantUserCourse({
+            userId: purchase.user_id,
+            courseId: purchase.course_id,
+            purchaseId: purchase.id,
+            status: 'active',
+          });
+        }
+      }
+    } catch (err) {
+      console.error('[tbank-reconcile-crash]', { message: err instanceof Error ? err.message : String(err) });
+    } finally {
+      running = false;
+    }
+  };
+
+  void reconcileOnce();
+  const timer = setInterval(() => {
+    void reconcileOnce();
+  }, intervalMs);
+
+  console.info('[tbank-reconcile-started]', { intervalMs, lookbackHours, batchSize });
+  return () => clearInterval(timer);
+};
 
 export default router;

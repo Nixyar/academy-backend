@@ -10,7 +10,7 @@ import htmlRouter from './routes/html.js';
 import contentRouter from './routes/content.js';
 import progressRouter from './routes/progress.js';
 import purchasesRouter from './routes/purchases.js';
-import paymentsRouter from './routes/payments.js';
+import paymentsRouter, { startTbankPurchaseReconciler } from './routes/payments.js';
 import coursesRouter from './routes/courses.js';
 
 const app = express();
@@ -99,4 +99,5 @@ app.use((err, req, res, next) => {
 app.listen(env.port, () => {
   // eslint-disable-next-line no-console
   console.log(`API listening on port ${env.port}`);
+  startTbankPurchaseReconciler();
 });

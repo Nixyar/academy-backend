@@ -20,18 +20,28 @@ const isGrantedStatus = (status) => {
 const upsertUserCourse = async ({ userId, courseId, purchaseId }) => {
   try {
     const grantedAt = new Date().toISOString();
+    const payload = {
+      user_id: userId,
+      course_id: courseId,
+      purchase_id: purchaseId,
+      status: 'active',
+      granted_at: grantedAt,
+    };
+
     const { error } = await supabaseAdmin
       .from('user_courses')
-      .upsert(
-        {
-          user_id: userId,
-          course_id: courseId,
-          purchase_id: purchaseId,
-          status: 'active',
-          granted_at: grantedAt,
-        },
-        { onConflict: 'user_id,course_id' },
-      );
+      .insert(payload, { onConflict: 'user_id,course_id', ignoreDuplicates: true });
+
+    if (!error) return true;
+
+    // Fallback if the unique constraint isn't present.
+    const message = String(error?.message || '').toLowerCase();
+    if (message.includes('on conflict') && message.includes('constraint')) {
+      const { error: fallbackError } = await supabaseAdmin
+        .from('user_courses')
+        .upsert(payload, { onConflict: 'user_id,course_id' });
+      return !fallbackError;
+    }
     return !error;
   } catch {
     return false;
