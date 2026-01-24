@@ -214,8 +214,6 @@ export const mutateCourseProgress = async (userId, courseId, mutator, opts = {})
   // Specialized optimization: if only active_job changed, use a RPC or specialized update.
 
   if (opts.onlyStatus) {
-    // Safety: if we only loaded status, we should not attempt to save the whole object
-    // Let's reload full if we actually have a change
     const { progress: fullCurrent } = await loadCourseProgress(userId, courseId);
     const fullDraft = normalizeProgress({ ...fullCurrent });
     const fullNext = await mutator(fullDraft);
