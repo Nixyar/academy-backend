@@ -864,8 +864,10 @@ const callLlm = async ({ system, prompt, temperature, maxTokens }) => {
 
   const err = new Error('LLM_REQUEST_FAILED');
   err.details =
-    lastError && typeof lastError === 'object' && 'message' in lastError
-      ? String(lastError.message)
+    lastError && typeof lastError === 'object'
+      ? ('details' in lastError && lastError.details != null
+        ? lastError.details
+        : ('message' in lastError ? String(lastError.message) : String(lastError)))
       : String(lastError || 'Unknown LLM error');
   err.status = 502;
   throw err;
