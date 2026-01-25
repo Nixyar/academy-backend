@@ -51,7 +51,7 @@ const env = {
   supabaseJwtSecret: process.env.SUPABASE_JWT_SECRET,
   cookieSecure,
   nodeEnv: process.env.NODE_ENV,
-  llmApiUrl: process.env.LLM_API_URL || 'http://95.81.102.68/v1/llm/generate',
+  llmApiUrl: process.env.LLM_API_URL || 'http://103.137.248.30/v1/llm/generate',
   supabaseTimeoutMs: Number(process.env.SUPABASE_TIMEOUT_MS) || 8000,
   tbankTimeoutMs: Number(process.env.TBANK_TIMEOUT_MS) || 15000,
   tbankReconcileIntervalMs: Number(process.env.TBANK_RECONCILE_INTERVAL_MS) || 120000,
