@@ -16,6 +16,7 @@ const messages = {
   FAILED_TO_FETCH_PROGRESS: 'Не удалось загрузить прогресс. Попробуйте ещё раз.',
   FAILED_TO_SAVE_PROGRESS: 'Не удалось сохранить прогресс. Попробуйте ещё раз.',
   FAILED_TO_FETCH_LESSONS: 'Не удалось загрузить уроки. Попробуйте ещё раз.',
+  FAILED_TO_FETCH_LESSON: 'Не удалось загрузить настройки урока. Попробуйте ещё раз.',
   FAILED_TO_FETCH_COURSES: 'Не удалось загрузить курсы. Попробуйте ещё раз.',
 
   DATABASE_TIMEOUT: 'Сервер долго отвечает. Попробуйте ещё раз.',
@@ -25,6 +26,7 @@ const messages = {
   PAYMENT_PROVIDER_ERROR: 'Платёжный сервис сейчас недоступен. Попробуйте позже.',
   COURSE_NOT_FOUND: 'Курс не найден.',
   PURCHASE_NOT_FOUND: 'Платёж не найден.',
+  LESSON_NOT_FOUND: 'Урок не найден.',
 
   JOB_NOT_FOUND: 'Задача не найдена. Попробуйте перезапустить.',
   NO_INDEX_HTML: 'Сначала сгенерируйте сайт, затем попробуйте ещё раз.',
@@ -37,6 +39,9 @@ const messages = {
   LLM_PLAN_NO_SECTIONS: 'AI вернул некорректный план. Попробуйте переформулировать запрос.',
   LLM_INVALID_HTML: 'AI вернул некорректный результат. Попробуйте ещё раз.',
   LLM_HTML_TOO_LARGE: 'Результат слишком большой. Попробуйте упростить запрос.',
+
+  LESSON_LLM_PLAN_SYSTEM_PROMPT_MISSING: 'Для урока не настроен системный prompt для плана генерации.',
+  LESSON_LLM_RENDER_SYSTEM_PROMPT_MISSING: 'Для урока не настроен системный prompt для рендера.',
 };
 
 export const getPublicMessage = (code) => {

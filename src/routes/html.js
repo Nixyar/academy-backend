@@ -712,17 +712,12 @@ const fetchLessonPrompts = async (lessonId, opts = {}) => {
     .from('lesson_llm_prompts')
     .select('llm_system_prompt,llm_plan_system_prompt,llm_render_system_prompt')
     .eq('lesson_id', lessonId)
-    .single();
+    .maybeSingle();
 
   if (promptsError) {
     const err = new Error('FAILED_TO_FETCH_LESSON');
     err.status = 500;
     err.details = promptsError.message;
-    throw err;
-  }
-  if (!prompts) {
-    const err = new Error('LESSON_NOT_FOUND');
-    err.status = 404;
     throw err;
   }
 
@@ -744,9 +739,15 @@ const fetchLessonPrompts = async (lessonId, opts = {}) => {
     throw err;
   }
 
-  const fallbackSystem = prompts.llm_system_prompt ?? null;
-  const planSystem = prompts.llm_plan_system_prompt ?? fallbackSystem;
-  const renderSystem = prompts.llm_render_system_prompt ?? fallbackSystem;
+  const resolvedPrompts = prompts ?? {
+    llm_system_prompt: null,
+    llm_plan_system_prompt: null,
+    llm_render_system_prompt: null,
+  };
+
+  const fallbackSystem = resolvedPrompts.llm_system_prompt ?? null;
+  const planSystem = resolvedPrompts.llm_plan_system_prompt ?? fallbackSystem;
+  const renderSystem = resolvedPrompts.llm_render_system_prompt ?? fallbackSystem;
 
   const normalizedPlan = typeof planSystem === 'string' ? planSystem.trim() : '';
   const normalizedRender = typeof renderSystem === 'string' ? renderSystem.trim() : '';
