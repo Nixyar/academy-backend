@@ -6,22 +6,6 @@ const toFiniteOrNull = (value) => {
   return Number.isFinite(num) ? num : null;
 };
 
-const normalizeProvider = (value) => String(value || '').trim().toLowerCase();
-
-const getProvider = () => {
-  const explicit = normalizeProvider(env.llmProvider);
-  if (explicit) return explicit;
-  if (env.geminiApiKey) return 'gemini';
-  return 'proxy';
-};
-
-const parseProxyText = async (resp) => {
-  const payload = await resp.json().catch(async () => ({ text: await resp.text() }));
-  if (typeof payload?.text === 'string') return payload.text;
-  if (typeof payload?.html === 'string') return payload.html;
-  return typeof payload === 'string' ? payload : JSON.stringify(payload);
-};
-
 const parseGeminiText = (payload) => {
   const candidates = Array.isArray(payload?.candidates) ? payload.candidates : [];
   const first = candidates[0];
@@ -54,63 +38,32 @@ export async function llmGenerateText(
   { system, prompt, temperature, maxTokens },
   { name = 'llm', timeoutMs = null, slowMs = null, logger = null } = {},
 ) {
-  const provider = getProvider();
-
-  if (provider === 'gemini') {
-    if (!env.geminiApiKey) {
-      throw new LlmRequestError('LLM_GEMINI_API_KEY_MISSING', { status: 500 });
-    }
-
-    const model = env.geminiModel || 'gemini-2.5-flash';
-    const url = `${env.geminiApiBaseUrl}/models/${encodeURIComponent(model)}:generateContent`;
-    const combined = buildCombinedPrompt({ system, prompt });
-
-    const generationConfig = {};
-    const t = toFiniteOrNull(temperature);
-    const mt = toFiniteOrNull(maxTokens);
-    if (t != null) generationConfig.temperature = t;
-    if (mt != null) generationConfig.maxOutputTokens = Math.max(1, Math.floor(mt));
-
-    const resp = await fetchWithTimeout(
-      url,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-goog-api-key': env.geminiApiKey,
-        },
-        body: JSON.stringify({
-          contents: [{ role: 'user', parts: [{ text: combined }]}],
-          ...(Object.keys(generationConfig).length ? { generationConfig } : {}),
-        }),
-      },
-      { name, timeoutMs, slowMs, logger },
-    );
-
-    if (!resp.ok) {
-      const errorText = await resp.text().catch(() => '');
-      throw new LlmRequestError('LLM_REQUEST_FAILED', {
-        status: resp.status,
-        statusText: resp.statusText,
-        contentType: resp.headers.get('content-type') || '',
-        body: String(errorText || '').slice(0, 2000),
-        provider,
-      });
-    }
-
-    const payload = await resp.json().catch(() => null);
-    const text = parseGeminiText(payload);
-    if (text) return text;
-    return JSON.stringify(payload ?? {});
+  if (!env.geminiApiKey) {
+    throw new LlmRequestError('LLM_GEMINI_API_KEY_MISSING', { status: 500 });
   }
 
-  // Default: proxy endpoint (legacy behavior).
+  const model = env.geminiModel || 'gemini-2.5-flash';
+  const url = `${env.geminiApiBaseUrl}/models/${encodeURIComponent(model)}:generateContent`;
+  const combined = buildCombinedPrompt({ system, prompt });
+
+  const generationConfig = {};
+  const t = toFiniteOrNull(temperature);
+  const mt = toFiniteOrNull(maxTokens);
+  if (t != null) generationConfig.temperature = t;
+  if (mt != null) generationConfig.maxOutputTokens = Math.max(1, Math.floor(mt));
+
   const resp = await fetchWithTimeout(
-    env.llmApiUrl,
+    url,
     {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ system, prompt, temperature, maxTokens }),
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': env.geminiApiKey,
+      },
+      body: JSON.stringify({
+        contents: [{ role: 'user', parts: [{ text: combined }]}],
+        ...(Object.keys(generationConfig).length ? { generationConfig } : {}),
+      }),
     },
     { name, timeoutMs, slowMs, logger },
   );
@@ -122,9 +75,12 @@ export async function llmGenerateText(
       statusText: resp.statusText,
       contentType: resp.headers.get('content-type') || '',
       body: String(errorText || '').slice(0, 2000),
-      provider,
+      provider: 'gemini',
     });
   }
 
-  return parseProxyText(resp);
+  const payload = await resp.json().catch(() => null);
+  const text = parseGeminiText(payload);
+  if (text) return text;
+  return JSON.stringify(payload ?? {});
 }

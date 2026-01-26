@@ -51,8 +51,6 @@ const env = {
   supabaseJwtSecret: process.env.SUPABASE_JWT_SECRET,
   cookieSecure,
   nodeEnv: process.env.NODE_ENV,
-  llmProvider: String(process.env.LLM_PROVIDER || '').trim() || null,
-  llmApiUrl: process.env.LLM_API_URL || 'http://103.137.248.30/v1/llm/generate',
   geminiApiKey: String(process.env.GEMINI_API_KEY || process.env.API_KEY || '').trim() || null,
   geminiModel: String(process.env.GEMINI_MODEL || '').trim() || 'gemini-2.5-flash',
   geminiApiBaseUrl: String(process.env.GEMINI_API_BASE_URL || '').trim() || 'https://generativelanguage.googleapis.com/v1beta',
