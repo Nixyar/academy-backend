@@ -3,7 +3,6 @@ import { randomUUID } from 'crypto';
 import env from '../config/env.js';
 import supabaseAdmin from '../lib/supabaseAdmin.js';
 import requireUser from '../middleware/requireUser.js';
-import { fetchWithTimeout } from '../lib/fetchWithTimeout.js';
 import { Semaphore } from '../lib/semaphore.js';
 import { sendApiError, toPublicError } from '../lib/publicErrors.js';
 import {
@@ -15,6 +14,7 @@ import {
 } from '../lib/courseProgress.js';
 import { ensureWorkspace } from '../lib/htmlWorkspace.js';
 import { consumeCourseQuota, getCourseQuota } from '../lib/courseQuota.js';
+import { llmGenerateText } from '../lib/llmGenerateText.js';
 
 const router = Router();
 
@@ -812,53 +812,34 @@ const callLlm = async ({ system, prompt, temperature, maxTokens }) => {
 
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
-      const resp = await llmSemaphore.run(() => fetchWithTimeout(env.llmApiUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          system,
-          prompt,
-          temperature,
-          maxTokens,
-        }),
-      }, {
-        name: 'llm',
-        slowMs: env.externalSlowLogMs,
-        logger: (event, data) => console.warn(`[${event}]`, data),
-      }));
-
-      if (!resp.ok) {
-        const contentType = resp.headers.get('content-type') || '';
-        const errorText = await resp.text().catch(() => '');
-        const details = {
-          status: resp.status,
-          statusText: resp.statusText,
-          contentType,
-          body: String(errorText || '').slice(0, 2000),
-        };
-
-        const err = new Error('LLM_REQUEST_FAILED');
-        err.details = details;
-        err.status = 502;
-
-        if (LLM_RETRYABLE_STATUSES.has(resp.status) && attempt < 3) {
-          await sleep(300 * attempt + Math.floor(Math.random() * 200));
-          continue;
-        }
-
-        throw err;
-      }
-
-      const payload = await resp.json().catch(async () => ({ text: await resp.text() }));
-      if (typeof payload?.text === 'string') return payload.text;
-      if (typeof payload?.html === 'string') return payload.html;
-      return String(payload || '');
+      return await llmSemaphore.run(() =>
+        llmGenerateText(
+          { system, prompt, temperature, maxTokens },
+          {
+            name: 'llm',
+            slowMs: env.externalSlowLogMs,
+            logger: (event, data) => console.warn(`[${event}]`, data),
+          },
+        ));
     } catch (e) {
       lastError = e;
-      const isAbort =
-        typeof e === 'object' && e && ('name' in e ? e.name === 'AbortError' : false);
-      if (!isAbort || attempt >= 3) break;
-      await sleep(300 * attempt + Math.floor(Math.random() * 200));
+      const isAbort = typeof e === 'object' && e && ('name' in e ? e.name === 'AbortError' : false);
+
+      const status = typeof e === 'object' && e && 'details' in e && e.details && typeof e.details === 'object'
+        ? e.details.status
+        : (typeof e === 'object' && e && 'status' in e ? e.status : null);
+
+      if (!isAbort && typeof status === 'number' && LLM_RETRYABLE_STATUSES.has(status) && attempt < 3) {
+        await sleep(300 * attempt + Math.floor(Math.random() * 200));
+        continue;
+      }
+
+      if (isAbort && attempt < 3) {
+        await sleep(300 * attempt + Math.floor(Math.random() * 200));
+        continue;
+      }
+
+      break;
     }
   }
 

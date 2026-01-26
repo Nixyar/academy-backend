@@ -1,9 +1,9 @@
 import { Router } from 'express';
 import env from '../config/env.js';
 import supabaseAdmin from '../lib/supabaseAdmin.js';
-import { fetchWithTimeout } from '../lib/fetchWithTimeout.js';
 import { Semaphore } from '../lib/semaphore.js';
 import { sendApiError } from '../lib/publicErrors.js';
+import { llmGenerateText } from '../lib/llmGenerateText.js';
 
 const router = Router();
 const llmSemaphore = new Semaphore(env.llmMaxConcurrency);
@@ -106,31 +106,32 @@ If you need to create a new file, include it too.
     }
 
     // Plan request
-    const planResp = await llmSemaphore.run(() => fetchWithTimeout(env.llmApiUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        system: context + normalizedPlan,
-        prompt: prompt.trim(),
-        temperature: 0.6,
-        maxTokens: 4096,
-      }),
-    }, {
-      name: 'llm-plan',
-      slowMs: env.externalSlowLogMs,
-      logger: (event, data) => console.warn(`[${event}]`, data),
-    }));
-
-    if (!planResp.ok) {
-      const errorText = await planResp.text().catch(() => null);
+    let planText;
+    try {
+      planText = await llmSemaphore.run(() =>
+        llmGenerateText(
+          {
+            system: context + normalizedPlan,
+            prompt: prompt.trim(),
+            temperature: 0.6,
+            maxTokens: 4096,
+          },
+          {
+            name: 'llm-plan',
+            slowMs: env.externalSlowLogMs,
+            logger: (event, data) => console.warn(`[${event}]`, data),
+          },
+        ));
+    } catch (e) {
       return res.status(502).json({
         error: 'LLM_PLAN_REQUEST_FAILED',
-        details: errorText || planResp.statusText,
+        details:
+          e && typeof e === 'object' && 'details' in e && e.details != null
+            ? e.details
+            : (e instanceof Error ? e.message : String(e)),
       });
     }
 
-    const planPayload = await planResp.json().catch(async () => ({ text: await planResp.text() }));
-    const planText = typeof planPayload?.text === 'string' ? planPayload.text : String(planPayload || '');
     const planObj = extractFirstJsonObject(planText);
 
     if (!planObj || typeof planObj !== 'object') {
@@ -147,31 +148,31 @@ ${JSON.stringify(planObj)}
 
 ${multiFileInstruction}`;
 
-    const htmlResp = await llmSemaphore.run(() => fetchWithTimeout(env.llmApiUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        system: normalizedRender,
-        prompt: renderPrompt,
-        temperature: 0.3,
-        maxTokens: 8192,
-      }),
-    }, {
-      name: 'llm-render',
-      slowMs: env.externalSlowLogMs,
-      logger: (event, data) => console.warn(`[${event}]`, data),
-    }));
-
-    if (!htmlResp.ok) {
-      const errorText = await htmlResp.text().catch(() => null);
+    let htmlText;
+    try {
+      htmlText = await llmSemaphore.run(() =>
+        llmGenerateText(
+          {
+            system: normalizedRender,
+            prompt: renderPrompt,
+            temperature: 0.3,
+            maxTokens: 8192,
+          },
+          {
+            name: 'llm-render',
+            slowMs: env.externalSlowLogMs,
+            logger: (event, data) => console.warn(`[${event}]`, data),
+          },
+        ));
+    } catch (e) {
       return res.status(502).json({
         error: 'LLM_RENDER_REQUEST_FAILED',
-        details: errorText || htmlResp.statusText,
+        details:
+          e && typeof e === 'object' && 'details' in e && e.details != null
+            ? e.details
+            : (e instanceof Error ? e.message : String(e)),
       });
     }
-
-    const htmlPayload = await htmlResp.json().catch(async () => ({ text: await htmlResp.text() }));
-    const htmlText = typeof htmlPayload?.text === 'string' ? htmlPayload.text : (typeof htmlPayload === 'string' ? htmlPayload : JSON.stringify(htmlPayload));
 
     const filesObj = extractFirstJsonObject(htmlText);
 

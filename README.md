@@ -24,7 +24,11 @@ Production-ready Express API for Supabase Auth session handling, Google OAuth vi
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase service role key for server-side profile access. |
 | `SUPABASE_ANON_KEY` | Supabase anon key for client-side auth operations (refresh). |
 | `SUPABASE_JWT_SECRET` | Supabase JWT secret for verifying access tokens (HS256). |
-| `LLM_API_URL` | Full URL for LLM generation endpoint (defaults to `http://95.81.99.208/v1/llm/generate`). |
+| `LLM_PROVIDER` | `proxy` (default) or `gemini` (direct Gemini calls). |
+| `LLM_API_URL` | LLM proxy endpoint URL (used when `LLM_PROVIDER=proxy`). |
+| `GEMINI_API_KEY` | Gemini Developer API key (used when `LLM_PROVIDER=gemini`). |
+| `GEMINI_MODEL` | Gemini model id (default: `gemini-2.5-flash`). |
+| `GEMINI_API_BASE_URL` | Gemini API base URL (default: `https://generativelanguage.googleapis.com/v1beta`). |
 | `COOKIE_SECURE` | `true` to send cookies with `Secure` (set to `false` for local HTTP). |
 | `NODE_ENV` | `development` or `production`. |
 | `TBANK_TERMINAL_KEY` | TBank TerminalKey (for `/api/payments/tbank/*`). |
