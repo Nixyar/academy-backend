@@ -58,6 +58,13 @@ const env = {
   geminiModel: String(process.env.GEMINI_MODEL || '').trim() || null,
   geminiApiBaseUrl:
     String(process.env.GEMINI_API_BASE_URL || '').trim() || 'https://generativelanguage.googleapis.com/v1beta',
+  openrouterApiKey: String(process.env.OPENROUTER_API_KEY || '').trim() || null,
+  openrouterApiBaseUrl: String(process.env.OPENROUTER_API_BASE_URL || '').trim() || 'https://openrouter.ai/api/v1',
+  openrouterModel: String(process.env.OPENROUTER_MODEL || '').trim() || null,
+  openrouterModelDefault: String(process.env.OPENROUTER_MODEL_DEFAULT || '').trim() || null,
+  openrouterModelPlan: String(process.env.OPENROUTER_MODEL_PLAN || '').trim() || null,
+  openrouterModelRender: String(process.env.OPENROUTER_MODEL_RENDER || '').trim() || null,
+  openrouterFallbackModel: String(process.env.OPENROUTER_FALLBACK_MODEL || '').trim() || null,
   supabaseTimeoutMs: Number(process.env.SUPABASE_TIMEOUT_MS) || 8000,
   tbankTimeoutMs: Number(process.env.TBANK_TIMEOUT_MS) || 15000,
   tbankReconcileIntervalMs: Number(process.env.TBANK_RECONCILE_INTERVAL_MS) || 120000,

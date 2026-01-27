@@ -29,6 +29,13 @@ Production-ready Express API for Supabase Auth session handling, Google OAuth vi
 | `GEMINI_API_KEY` | Gemini Developer API key (used for direct Gemini calls). |
 | `GEMINI_MODEL` | Gemini model id (default: `gemini-2.5-flash`). |
 | `GEMINI_API_BASE_URL` | Gemini API base URL (default: `https://generativelanguage.googleapis.com/v1beta`). |
+| `OPENROUTER_API_KEY` | OpenRouter API key (used as fallback when primary LLM fails). |
+| `OPENROUTER_API_BASE_URL` | OpenRouter API base URL (default: `https://openrouter.ai/api/v1`). |
+| `OPENROUTER_MODEL` | Default OpenRouter model for fallback (e.g. `google/gemini-2.0-flash-001`). |
+| `OPENROUTER_MODEL_DEFAULT` | Optional override for `name=llm` requests. |
+| `OPENROUTER_MODEL_PLAN` | Optional override for `name=llm-plan` requests. |
+| `OPENROUTER_MODEL_RENDER` | Optional override for `name=llm-render` requests. |
+| `OPENROUTER_FALLBACK_MODEL` | Free/cheap OpenRouter model used when credits/quota run out. |
 | `COOKIE_SECURE` | `true` to send cookies with `Secure` (set to `false` for local HTTP). |
 | `NODE_ENV` | `development` or `production`. |
 | `TBANK_TERMINAL_KEY` | TBank TerminalKey (for `/api/payments/tbank/*`). |
@@ -49,6 +56,12 @@ Copy `.env.example` to `.env` and fill values for local runs:
 cp .env.example .env
 ```
 
+### OpenRouter model selection (fallback)
+- If OpenRouter is used, the model is chosen in this order:
+  1) Task-specific: `OPENROUTER_MODEL_PLAN` for `llm-plan`, `OPENROUTER_MODEL_RENDER` for `llm-render`, `OPENROUTER_MODEL_DEFAULT` for `llm`
+  2) `OPENROUTER_MODEL`
+  3) `OPENROUTER_FALLBACK_MODEL` (only used when OpenRouter returns a credits/quota error)
+
 ## Local development
 ```bash
 npm install
@@ -61,8 +74,9 @@ The API will start on `PORT` (defaults to `3000` in `.env.example`).
 - `POST /api/lessons/:lessonId/llm` with body `{ prompt }`
   - Loads the lesson by `id` from Supabase and reads `llm_system_prompt`.
   - Calls the configured LLM gateway (`LLM_API_URL`) when set, otherwise calls Gemini directly.
+  - If the primary LLM fails (5xx, timeout, or rate-limit) and OpenRouter is configured, automatically retries via OpenRouter. If OpenRouter returns a credits/quota error, it falls back to `OPENROUTER_FALLBACK_MODEL` (when provided).
   - Response mirrors the upstream LLM: `{ text, model, usage: { promptTokens, completionTokens } }`; returns `404 { error: 'LESSON_NOT_FOUND' }` if the lesson is missing, `400 { error: 'LESSON_LLM_SYSTEM_PROMPT_MISSING' }` if the field is empty, or `502 { error: 'LLM_REQUEST_FAILED' }` if upstream fails.
-- HTML streaming (lesson-scoped prompts from Supabase; auth required):
+  - HTML streaming (lesson-scoped prompts from Supabase; auth required):
   - `POST /api/v1/html/start` with body `{ prompt, lessonId }`
     - Reads `user_id` from Supabase cookies, resolves `course_id` by `lessonId`.
     - If an active `progress.active_job` for this course is queued/running → returns it (`{ already_running: true, jobId, status }`) without creating a new one.
