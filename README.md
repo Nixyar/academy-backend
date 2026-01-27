@@ -24,6 +24,8 @@ Production-ready Express API for Supabase Auth session handling, Google OAuth vi
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase service role key for server-side profile access. |
 | `SUPABASE_ANON_KEY` | Supabase anon key for client-side auth operations (refresh). |
 | `SUPABASE_JWT_SECRET` | Supabase JWT secret for verifying access tokens (HS256). |
+| `LLM_API_URL` | LLM gateway/proxy endpoint (e.g. `https://.../v1/llm/generate`). |
+| `LLM_GATEWAY_TOKEN` | Optional gateway token sent as `X-Gateway-Token`. |
 | `GEMINI_API_KEY` | Gemini Developer API key (used for direct Gemini calls). |
 | `GEMINI_MODEL` | Gemini model id (default: `gemini-2.5-flash`). |
 | `GEMINI_API_BASE_URL` | Gemini API base URL (default: `https://generativelanguage.googleapis.com/v1beta`). |
@@ -58,7 +60,7 @@ The API will start on `PORT` (defaults to `3000` in `.env.example`).
 - `GET /api/health` → `{ ok: true }` (for uptime checks).
 - `POST /api/lessons/:lessonId/llm` with body `{ prompt }`
   - Loads the lesson by `id` from Supabase and reads `llm_system_prompt`.
-  - Calls Gemini directly with `{ prompt, system: llm_system_prompt, temperature: 0.2, maxTokens: 1024 }`.
+  - Calls the configured LLM gateway (`LLM_API_URL`) when set, otherwise calls Gemini directly.
   - Response mirrors the upstream LLM: `{ text, model, usage: { promptTokens, completionTokens } }`; returns `404 { error: 'LESSON_NOT_FOUND' }` if the lesson is missing, `400 { error: 'LESSON_LLM_SYSTEM_PROMPT_MISSING' }` if the field is empty, or `502 { error: 'LLM_REQUEST_FAILED' }` if upstream fails.
 - HTML streaming (lesson-scoped prompts from Supabase; auth required):
   - `POST /api/v1/html/start` with body `{ prompt, lessonId }`

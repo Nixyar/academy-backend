@@ -12,7 +12,7 @@ const lessonsCache = new Map(); // key -> { expiresAt, data }
 const lessonsInFlight = new Map(); // key -> Promise<unknown[]>
 
 const COURSES_CACHE_TTL_MS = 5000;
-const coursesCache = new Map(); // key -> { expiresAt, data }
+const coursesCache = new Map();
 const coursesInFlight = new Map(); // key -> Promise<unknown[]>
 
 const parseEq = (value) => {
