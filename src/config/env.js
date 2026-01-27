@@ -51,7 +51,7 @@ const env = {
   supabaseJwtSecret: process.env.SUPABASE_JWT_SECRET,
   cookieSecure,
   nodeEnv: process.env.NODE_ENV,
-  llmApiUrl: String(process.env.LLM_API_URL || '').trim() || 'http://144.124.247.131/v1/llm/generate',
+  llmApiUrl: String(process.env.LLM_API_URL || '').trim() || 'https://gateway-vibecoderai.ru/v1/llm/generate',
   llmApiUrlIsDefault: !(String(process.env.LLM_API_URL || '').trim()),
   llmGatewayToken: String(process.env.LLM_GATEWAY_TOKEN || '').trim() || null,
   geminiApiKey: String(process.env.GEMINI_API_KEY || '').trim() || null,

@@ -88,6 +88,21 @@ const stripFences = (s) =>
     .replace(/^\s*json\s*\/?\s*/i, '')
     .trim();
 
+const isMissingTableError = (error, tableName) => {
+  const message = error && typeof error === 'object' && 'message' in error ? String(error.message) : '';
+  const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
+  const name = String(tableName || '').trim();
+  if (!name) return false;
+  return (
+    code === '42P01' ||
+    message.includes(`relation \"${name}\" does not exist`) ||
+    message.includes(`relation '${name}' does not exist`) ||
+    message.includes(`relation ${name} does not exist`) ||
+    message.includes(`Could not find the '${name}' table`) ||
+    message.includes(`could not find the '${name}' table`)
+  );
+};
+
 const tryParseJsonObject = (s) => {
   try {
     const parsed = JSON.parse(s);
@@ -714,16 +729,9 @@ const fetchLessonPrompts = async (lessonId, opts = {}) => {
     .eq('lesson_id', lessonId)
     .maybeSingle();
 
-  if (promptsError) {
-    const err = new Error('FAILED_TO_FETCH_LESSON');
-    err.status = 500;
-    err.details = promptsError.message;
-    throw err;
-  }
-
   const { data: lesson, error } = await supabaseAdmin
     .from('lessons')
-    .select('id,course_id,settings')
+    .select('id,course_id,settings,llm_system_prompt,llm_plan_system_prompt,llm_render_system_prompt')
     .eq('id', lessonId)
     .maybeSingle();
 
@@ -739,11 +747,20 @@ const fetchLessonPrompts = async (lessonId, opts = {}) => {
     throw err;
   }
 
-  const resolvedPrompts = prompts ?? {
-    llm_system_prompt: null,
-    llm_plan_system_prompt: null,
-    llm_render_system_prompt: null,
+  if (promptsError && !isMissingTableError(promptsError, 'lesson_llm_prompts')) {
+    const err = new Error('FAILED_TO_FETCH_LESSON');
+    err.status = 500;
+    err.details = promptsError.message;
+    throw err;
+  }
+
+  const lessonPrompts = {
+    llm_system_prompt: lesson.llm_system_prompt ?? null,
+    llm_plan_system_prompt: lesson.llm_plan_system_prompt ?? null,
+    llm_render_system_prompt: lesson.llm_render_system_prompt ?? null,
   };
+
+  const resolvedPrompts = prompts ?? lessonPrompts;
 
   const fallbackSystem = resolvedPrompts.llm_system_prompt ?? null;
   const planSystem = resolvedPrompts.llm_plan_system_prompt ?? fallbackSystem;

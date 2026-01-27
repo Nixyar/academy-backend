@@ -24,7 +24,7 @@ Production-ready Express API for Supabase Auth session handling, Google OAuth vi
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase service role key for server-side profile access. |
 | `SUPABASE_ANON_KEY` | Supabase anon key for client-side auth operations (refresh). |
 | `SUPABASE_JWT_SECRET` | Supabase JWT secret for verifying access tokens (HS256). |
-| `LLM_API_URL` | LLM gateway/proxy endpoint (e.g. `https://.../v1/llm/generate`). |
+| `LLM_API_URL` | LLM gateway/proxy endpoint (e.g. `https://gateway-vibecoderai.ru/v1/llm/generate`). |
 | `LLM_GATEWAY_TOKEN` | Optional gateway token sent as `X-Gateway-Token`. |
 | `GEMINI_API_KEY` | Gemini Developer API key (used for direct Gemini calls). |
 | `GEMINI_MODEL` | Gemini model id (default: `gemini-2.5-flash`). |

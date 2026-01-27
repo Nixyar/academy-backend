@@ -48,6 +48,21 @@ const extractFirstJsonObject = (text) => {
   return repairJson(m[0]);
 };
 
+const isMissingTableError = (error, tableName) => {
+  const message = error && typeof error === 'object' && 'message' in error ? String(error.message) : '';
+  const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
+  const name = String(tableName || '').trim();
+  if (!name) return false;
+  return (
+    code === '42P01' ||
+    message.includes(`relation \"${name}\" does not exist`) ||
+    message.includes(`relation '${name}' does not exist`) ||
+    message.includes(`relation ${name} does not exist`) ||
+    message.includes(`Could not find the '${name}' table`) ||
+    message.includes(`could not find the '${name}' table`)
+  );
+};
+
 router.post('/:lessonId/llm', async (req, res, next) => {
   try {
     const { lessonId } = req.params;
@@ -82,18 +97,34 @@ If you need to create a new file, include it too.
 `;
     // ----------------------------
 
-    const { data: prompts, error } = await supabaseAdmin
+    const { data: prompts, error: promptsError } = await supabaseAdmin
       .from('lesson_llm_prompts')
       .select('llm_system_prompt,llm_plan_system_prompt,llm_render_system_prompt')
       .eq('lesson_id', lessonId)
-      .single();
+      .maybeSingle();
 
-    if (error) return sendApiError(res, 500, 'INTERNAL_ERROR');
-    if (!prompts) return sendApiError(res, 404, 'LESSON_NOT_FOUND');
+    const { data: lesson, error: lessonError } = await supabaseAdmin
+      .from('lessons')
+      .select('id,llm_system_prompt,llm_plan_system_prompt,llm_render_system_prompt')
+      .eq('id', lessonId)
+      .maybeSingle();
 
-    const fallbackSystem = prompts.llm_system_prompt ?? null;
-    const planSystem = prompts.llm_plan_system_prompt ?? fallbackSystem;
-    const renderSystem = prompts.llm_render_system_prompt ?? fallbackSystem;
+    if (lessonError) return sendApiError(res, 500, 'INTERNAL_ERROR');
+    if (!lesson) return sendApiError(res, 404, 'LESSON_NOT_FOUND');
+
+    if (promptsError && !isMissingTableError(promptsError, 'lesson_llm_prompts')) {
+      return sendApiError(res, 500, 'INTERNAL_ERROR');
+    }
+
+    const resolvedPrompts = prompts ?? {
+      llm_system_prompt: lesson.llm_system_prompt ?? null,
+      llm_plan_system_prompt: lesson.llm_plan_system_prompt ?? null,
+      llm_render_system_prompt: lesson.llm_render_system_prompt ?? null,
+    };
+
+    const fallbackSystem = resolvedPrompts.llm_system_prompt ?? null;
+    const planSystem = resolvedPrompts.llm_plan_system_prompt ?? fallbackSystem;
+    const renderSystem = resolvedPrompts.llm_render_system_prompt ?? fallbackSystem;
 
     const normalizedPlan = typeof planSystem === 'string' ? planSystem.trim() : '';
     const normalizedRender = typeof renderSystem === 'string' ? renderSystem.trim() : '';
