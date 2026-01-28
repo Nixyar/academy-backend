@@ -12,7 +12,7 @@ const REFRESH_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
 const baseCookieOptions = {
   httpOnly: true,
-  sameSite: 'strict', // Изменено с 'lax' для защиты от CSRF
+  sameSite: 'lax', // ВРЕМЕННО откачено на 'lax' из-за 401 при refresh
   secure: env.cookieSecure,
   path: '/',
 };

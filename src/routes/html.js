@@ -1343,7 +1343,7 @@ ${currentCode}
         system: `${job.renderSystem}\n\n${cssSystemSuffix}\n${job.context}`,
         prompt: cssPrompt,
         temperature: 0.2,
-        maxTokens: 1800,
+        maxTokens: 4000, // Увеличено с 1800 для полного CSS
       });
 
       const cssDebugEntry = recordDebug(job, {
@@ -1399,7 +1399,7 @@ Return ONLY:
           system: `${job.renderSystem}\n\n${sectionSystemSuffix.replace('{ID}', key)}\n${job.context}`,
           prompt: sectionPrompt,
           temperature: 0.15,
-          maxTokens: 2000,
+          maxTokens: 8000, // Увеличено с 2000 для полных секций
         });
 
         const sectionDebug = recordDebug(job, {
@@ -1431,7 +1431,7 @@ CRITICAL:
             system: `${job.renderSystem}\n\n${sectionSystemSuffix.replace('{ID}', key)}\n${job.context}`,
             prompt: retryPrompt,
             temperature: 0.05,
-            maxTokens: 2000,
+            maxTokens: 8000, // Увеличено с 2000 для полных секций
           });
 
           sectionHtml = cleanHtmlFragment(normalizeLlmHtml(retryText));
@@ -1685,7 +1685,7 @@ ${assembledSections.join('\n\n')}
       system,
       prompt,
       temperature: 0.2,
-      maxTokens: 3000,
+      maxTokens: 8000, // Увеличено с 3000 для полной страницы
     });
 
     emitStatus(job, 'validating', 'validating llm output', 0.6);
