@@ -5,7 +5,7 @@ const normalizeId = (value) => String(value || '').trim();
 // Backend-side cache to reduce database load
 const QUOTA_CACHE_TTL_MS = 10000; // 10 seconds
 const QUOTA_STALE_CACHE_TTL_MS = 60000; // 1 minute for stale cache
-const QUOTA_TIMEOUT_MS = 5000; // 5 seconds timeout
+const QUOTA_TIMEOUT_MS = 3000; // 3 seconds timeout (быстрый фейл для quota)
 const quotaCache = new Map();
 const staleQuotaCache = new Map(); // Fallback cache for timeouts
 const inFlightQueries = new Map();

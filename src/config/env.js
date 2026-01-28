@@ -58,7 +58,7 @@ const env = {
   geminiModel: String(process.env.GEMINI_MODEL || '').trim() || null,
   geminiApiBaseUrl:
     String(process.env.GEMINI_API_BASE_URL || '').trim() || 'https://generativelanguage.googleapis.com/v1beta',
-  supabaseTimeoutMs: Number(process.env.SUPABASE_TIMEOUT_MS) || 8000,
+  supabaseTimeoutMs: Number(process.env.SUPABASE_TIMEOUT_MS) || 5000,
   tbankTimeoutMs: Number(process.env.TBANK_TIMEOUT_MS) || 15000,
   tbankReconcileIntervalMs: Number(process.env.TBANK_RECONCILE_INTERVAL_MS) || 120000,
   tbankReconcileLookbackHours: Number(process.env.TBANK_RECONCILE_LOOKBACK_HOURS) || 168,
