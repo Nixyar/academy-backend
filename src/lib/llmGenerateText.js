@@ -79,13 +79,44 @@ const isRetryableOpenRouterCreditError = (status, bodyText) => {
   );
 };
 
-const shouldFallbackToOpenRouter = (error) => {
-  if (!env.openrouterApiKey || !hasOpenRouterModel()) return false;
+let geminiConsecutive5xx = 0;
+
+const resetGeminiFailures = () => {
+  geminiConsecutive5xx = 0;
+};
+
+const noteGeminiFailure = (status) => {
+  if (typeof status !== 'number') return;
+  if (status >= 500) {
+    geminiConsecutive5xx += 1;
+  } else {
+    geminiConsecutive5xx = 0;
+  }
+};
+
+const getErrorMeta = (error) => {
   const details = error && typeof error === 'object' && 'details' in error ? error.details : null;
+  const provider =
+    details && typeof details === 'object' && typeof details.provider === 'string'
+      ? details.provider
+      : (error && typeof error === 'object' && typeof error.provider === 'string' ? error.provider : null);
   const status =
     details && typeof details === 'object' && typeof details.status === 'number'
       ? details.status
       : (error && typeof error === 'object' && typeof error.status === 'number' ? error.status : null);
+  return { provider, status };
+};
+
+const shouldFallbackToOpenRouter = (error) => {
+  if (!env.openrouterApiKey || !hasOpenRouterModel()) return false;
+  const { provider, status } = getErrorMeta(error);
+
+  if (provider === 'gemini') {
+    if (typeof status === 'number' && status >= 500) {
+      return geminiConsecutive5xx >= 3;
+    }
+    return false;
+  }
 
   if (status == null) return true;
   if (status >= 500) return true;
@@ -216,8 +247,15 @@ export async function llmGenerateText(
   };
 
   try {
-    return await callPrimaryProvider();
+    const result = await callPrimaryProvider();
+    resetGeminiFailures();
+    return result;
   } catch (error) {
+    const { provider, status } = getErrorMeta(error);
+    if (provider === 'gemini') {
+      noteGeminiFailure(status);
+    }
+
     if (!shouldFallbackToOpenRouter(error)) {
       throw error;
     }
