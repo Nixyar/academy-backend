@@ -1,6 +1,8 @@
 import express from 'express';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
+import rateLimit from 'express-rate-limit';
+import helmet from 'helmet';
 import env from './config/env.js';
 import authRouter from './routes/auth.js';
 import meRouter from './routes/me.js';
@@ -12,19 +14,36 @@ import progressRouter from './routes/progress.js';
 import purchasesRouter from './routes/purchases.js';
 import paymentsRouter, { startTbankPurchaseReconciler } from './routes/payments.js';
 import coursesRouter from './routes/courses.js';
+import feedbackRouter from './routes/feedback.js';
 
 const app = express();
+
+app.use(helmet({
+  contentSecurityPolicy: false, // Отключен, т.к. фронт на отдельном домене
+  hsts: {
+    maxAge: 31536000,
+    includeSubDomains: true,
+    preload: true,
+  },
+  frameguard: { action: 'deny' },
+  noSniff: true,
+  xssFilter: true,
+}));
 
 const corsAllowlist = env.webOrigins.map((origin) => origin.trim());
 
 const isAllowedOrigin = (origin) => {
-  if (!origin) return true;
+  if (!origin) return false; // Блокировать запросы без Origin
 
   const normalized = origin.trim();
   if (corsAllowlist.includes(normalized)) return true;
 
-  // Always allow localhost so local dev ports like 3000/3001/5173 work even if NODE_ENV=production
-  if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(normalized)) return true;
+  // Разрешить localhost ТОЛЬКО в development
+  if (env.nodeEnv === 'development') {
+    if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(normalized)) {
+      return true;
+    }
+  }
 
   return false;
 };
@@ -71,18 +90,52 @@ app.use((req, res, next) => {
 app.use(express.json());
 app.use(cookieParser());
 
+// Global rate limit
+const globalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 min
+  max: 100, // 100 requests per IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => {
+    res.status(429).json({
+      error: 'TOO_MANY_REQUESTS',
+      message: 'Слишком много запросов. Попробуйте позже.',
+    });
+  },
+});
+
+// Strict limiter for auth endpoints
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5, // 5 attempts per 15 min
+  skipSuccessfulRequests: true,
+});
+
+// LLM endpoint limiter
+const llmLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30, // 30 LLM requests per 15 min
+});
+
+app.use('/api', globalLimiter);
+
 const api = express.Router();
 
 api.get('/health', (req, res) => {
   res.json({ ok: true });
 });
 
+api.use('/auth/login', authLimiter);
+api.use('/auth/register', authLimiter);
 api.use('/auth', authRouter);
 api.use('/me', meRouter);
+api.use('/feedback', feedbackRouter);
 api.use('/purchases', purchasesRouter);
 api.use('/payments', paymentsRouter);
 api.use('/lessons', lessonContentRouter);
+api.use('/lessons', llmLimiter);
 api.use('/lessons', llmRouter);
+api.use('/v1/html', llmLimiter);
 api.use('/v1/html', htmlRouter);
 api.use('/', progressRouter);
 api.use('/courses', coursesRouter);
@@ -91,9 +144,21 @@ api.use('/rest/v1', contentRouter);
 app.use('/api', api);
 
 app.use((err, req, res, next) => {
+  // Безопасное логирование без чувствительных данных
   // eslint-disable-next-line no-console
-  console.error(err);
-  res.status(500).json({ error: 'INTERNAL_ERROR', message: 'Произошла ошибка. Попробуйте ещё раз.' });
+  console.error('[ERROR]', {
+    message: err.message,
+    stack: env.nodeEnv === 'production' ? undefined : err.stack,
+    method: req.method,
+    path: req.originalUrl || req.url,
+    status: err.status || 500,
+    // НЕ логируем: req.cookies, req.headers.authorization, req.body.password
+  });
+
+  res.status(err.status || 500).json({
+    error: 'INTERNAL_ERROR',
+    message: 'Произошла ошибка. Попробуйте ещё раз.'
+  });
 });
 
 app.listen(env.port, () => {

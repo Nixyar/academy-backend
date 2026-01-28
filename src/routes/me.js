@@ -21,7 +21,7 @@ router.get('/', requireUser, async (req, res, next) => {
 
     const { data: existingProfile, error: fetchError } = await supabaseAdmin
       .from('profiles')
-      .select('*')
+      .select('id,email,name,avatar_url,plan,daily_limit,daily_used,terms_accepted,privacy_accepted')
       .eq('id', user.id)
       .maybeSingle();
 
@@ -100,7 +100,7 @@ router.post('/consent', requireUser, async (req, res, next) => {
       .from('profiles')
       .update(updates)
       .eq('id', user.id)
-      .select('*')
+      .select('id,email,name,avatar_url,plan,daily_limit,daily_used,terms_accepted,privacy_accepted')
       .maybeSingle();
 
     if (updateError) {
@@ -125,7 +125,7 @@ router.post('/consent', requireUser, async (req, res, next) => {
     const { data: created, error: insertError } = await supabaseAdmin
       .from('profiles')
       .insert(newProfile)
-      .select('*')
+      .select('id,email,name,avatar_url,plan,daily_limit,daily_used,terms_accepted,privacy_accepted')
       .single();
 
     if (insertError) {

@@ -12,7 +12,7 @@ const REFRESH_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
 const baseCookieOptions = {
   httpOnly: true,
-  sameSite: 'lax',
+  sameSite: 'strict', // Изменено с 'lax' для защиты от CSRF
   secure: env.cookieSecure,
   path: '/',
 };
@@ -92,6 +92,18 @@ router.post('/register', async (req, res) => {
 
   if (!name || !email || !password) {
     return sendApiError(res, 400, 'INVALID_REQUEST');
+  }
+
+  // Password validation
+  if (password.length < 8) {
+    return sendApiError(res, 400, 'PASSWORD_TOO_SHORT', {
+      message: 'Пароль должен содержать минимум 8 символов',
+    });
+  }
+  if (!/[A-Za-z]/.test(password) || !/[0-9]/.test(password)) {
+    return sendApiError(res, 400, 'PASSWORD_TOO_WEAK', {
+      message: 'Пароль должен содержать буквы и цифры',
+    });
   }
 
   const { data, error } = await supabaseAuth.auth.signUp({

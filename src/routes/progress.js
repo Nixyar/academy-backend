@@ -321,6 +321,33 @@ router.put('/courses/:courseId/progress', requireUser, async (req, res, next) =>
       return sendApiError(res, 400, 'INVALID_REQUEST');
     }
 
+    // IDOR Protection: Check course access
+    const { data: course } = await supabaseAdmin
+      .from('courses')
+      .select('id, access')
+      .eq('id', courseId)
+      .single();
+
+    if (!course) {
+      return sendApiError(res, 404, 'COURSE_NOT_FOUND');
+    }
+
+    // Check if user has access to paid/pro courses
+    if (course.access === 'paid' || course.access === 'pro') {
+      const { data: purchase } = await supabaseAdmin
+        .from('user_courses')
+        .select('id')
+        .eq('user_id', user.id)
+        .eq('course_id', courseId)
+        .maybeSingle();
+
+      if (!purchase) {
+        return sendApiError(res, 403, 'FORBIDDEN', {
+          message: 'У вас нет доступа к этому курсу',
+        });
+      }
+    }
+
     if (!bodyProgress || typeof bodyProgress !== 'object' || Array.isArray(bodyProgress)) {
       return sendApiError(res, 400, 'INVALID_REQUEST');
     }

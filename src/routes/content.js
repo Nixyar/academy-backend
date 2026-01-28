@@ -64,19 +64,31 @@ router.get('/courses', async (req, res, next) => {
       return res.json(data);
     }
 
-    const buildQuery = () => {
-      let query = supabaseAnon.from('courses').select(selectFields).order('sort_order', { ascending: true });
+    // Input validation whitelists
+    const ALLOWED_STATUS = ['draft', 'published', 'archived'];
+    const ALLOWED_ACCESS = ['free', 'paid', 'pro'];
 
-      if (status) {
-        query = query.eq('status', parseEq(status));
+    const validateEnum = (value, allowed) => {
+      if (!value) return null;
+      const parsed = parseEq(value);
+      return allowed.includes(parsed) ? parsed : null;
+    };
+
+    const buildQuery = () => {
+      let query = supabaseAnon.from('courses').select(selectFields).order('sort_order', { ascending: true }).range(0, 99);
+
+      const validatedStatus = validateEnum(status, ALLOWED_STATUS);
+      if (validatedStatus) {
+        query = query.eq('status', validatedStatus);
       }
 
       if (slug) {
         query = query.eq('slug', parseEq(slug));
       }
 
-      if (access) {
-        query = query.eq('access', parseEq(access));
+      const validatedAccess = validateEnum(access, ALLOWED_ACCESS);
+      if (validatedAccess) {
+        query = query.eq('access', validatedAccess);
       }
 
       return query;

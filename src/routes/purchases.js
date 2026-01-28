@@ -81,9 +81,19 @@ router.get('/courses', requireUser, async (req, res, next) => {
 
     // Backfill `user_courses` for old rows or when the access table was cleared manually.
     if (!userCoursesError && paidRows.length > 0) {
-      await Promise.allSettled(
-        paidRows.map((row) => upsertUserCourse({ userId: user.id, courseId: row.course_id, purchaseId: row.id })),
-      );
+      const grantedAt = new Date().toISOString();
+      const records = paidRows.map(row => ({
+        user_id: user.id,
+        course_id: row.course_id,
+        purchase_id: row.id,
+        status: 'active',
+        granted_at: grantedAt,
+      }));
+
+      await supabaseAdmin
+        .from('user_courses')
+        .upsert(records, { onConflict: 'user_id,course_id', ignoreDuplicates: false })
+        .catch(() => null); // Игнорируем ошибки для backfill
     }
 
     const purchasedCourseIds = paidRows.map((row) => row.course_id);
