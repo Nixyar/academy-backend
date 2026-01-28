@@ -124,48 +124,58 @@ async function ensureQuotaRow(userId, courseId, limit) {
   const cid = normalizeId(courseId);
   if (!uid || !cid) throw Object.assign(new Error('INVALID_REQUEST'), { status: 400 });
 
-  const nowIso = new Date().toISOString();
-  const payloadBase = {
-    user_id: uid,
-    course_id: cid,
-    used: 0,
-    updated_at: nowIso,
-  };
+  // Сначала пытаемся получить существующую запись
+  const existing = await fetchQuotaRow(uid, cid);
 
-  // Use upsert with RETURNING to reduce queries from 3 to 1
-  let upsert = await supabaseAdmin
-    .from('llm_course_quota')
-    .upsert(
-      { ...payloadBase, limit: limit == null ? null : Math.max(0, limit) },
-      { onConflict: 'user_id,course_id', ignoreDuplicates: false }
-    )
-    .select('user_id,course_id,used,limit,updated_at')
-    .maybeSingle();
+  if (!existing) {
+    // Записи нет - создаем новую с used: 0
+    const nowIso = new Date().toISOString();
+    const payloadBase = {
+      user_id: uid,
+      course_id: cid,
+      used: 0,
+      updated_at: nowIso,
+    };
 
-  // Fallback for older schema without per-row limit column
-  if (upsert.error && isMissingFieldError(upsert.error, 'limit')) {
-    upsert = await supabaseAdmin
+    let insert = await supabaseAdmin
       .from('llm_course_quota')
-      .upsert(payloadBase, { onConflict: 'user_id,course_id', ignoreDuplicates: false })
-      .select('user_id,course_id,used,updated_at')
-      .maybeSingle();
+      .insert({ ...payloadBase, limit: limit == null ? null : Math.max(0, limit) });
+
+    if (insert.error && isMissingFieldError(insert.error, 'limit')) {
+      insert = await supabaseAdmin.from('llm_course_quota').insert(payloadBase);
+    }
+
+    if (insert.error) {
+      throw Object.assign(new Error('FAILED_TO_CREATE_COURSE_QUOTA'), { status: 500, details: insert.error });
+    }
+
+    // Возвращаем свежесозданную запись
+    const row = await fetchQuotaRow(uid, cid);
+    if (!row) throw Object.assign(new Error('FAILED_TO_FETCH_COURSE_QUOTA'), { status: 500 });
+    return row;
   }
 
-  if (upsert.error) {
-    throw Object.assign(new Error('FAILED_TO_UPSERT_COURSE_QUOTA'), { status: 500, details: upsert.error });
+  // Запись существует - обновляем только limit, если нужно (НЕ трогаем used!)
+  if (limit != null && existing.limit != null && existing.limit !== limit) {
+    const nowIsoUpdate = new Date().toISOString();
+    const update = await supabaseAdmin
+      .from('llm_course_quota')
+      .update({ limit, updated_at: nowIsoUpdate })
+      .eq('user_id', uid)
+      .eq('course_id', cid);
+
+    if (update.error && !isMissingFieldError(update.error, 'limit')) {
+      throw Object.assign(new Error('FAILED_TO_UPDATE_COURSE_QUOTA'), { status: 500, details: update.error });
+    }
+
+    // После обновления получаем свежую запись
+    const row = await fetchQuotaRow(uid, cid);
+    if (!row) throw Object.assign(new Error('FAILED_TO_FETCH_COURSE_QUOTA'), { status: 500 });
+    return row;
   }
 
-  if (!upsert.data) {
-    throw Object.assign(new Error('FAILED_TO_FETCH_COURSE_QUOTA'), { status: 500 });
-  }
-
-  return {
-    user_id: uid,
-    course_id: cid,
-    used: toIntOrNull(upsert.data.used) ?? 0,
-    limit: 'limit' in upsert.data ? toIntOrNull(upsert.data.limit) : null,
-    updated_at: upsert.data.updated_at,
-  };
+  // Запись существует и limit не изменился - возвращаем как есть
+  return existing;
 }
 
 async function getCourseQuotaUncached({ userId, courseId }) {
