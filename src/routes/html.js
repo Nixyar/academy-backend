@@ -1298,7 +1298,7 @@ ${currentCode}
       system: context + planSystem,
       prompt: job.instruction,
       temperature: 0.6,
-      maxTokens: 4096,
+      maxTokens: 8192, // Увеличено с 4096 для полного плана
     });
 
     const outline = extractFirstJsonObject(outlineText);
