@@ -304,6 +304,15 @@ router.get('/courses/:courseId/quota', requireUser, async (req, res, next) => {
     const quota = await getCourseQuota({ userId: req.user.id, courseId });
     return res.json({ courseId, limit: quota.limit, used: quota.used, remaining: quota.remaining });
   } catch (error) {
+    // При таймауте или ошибке БД - возвращаем unlimited чтобы не блокировать пользователя
+    if (error.message && error.message.includes('TIMEOUT')) {
+      console.error('[quota] Timeout fetching quota, returning unlimited', {
+        userId: req.user.id,
+        courseId: req.params.courseId
+      });
+      return res.json({ courseId: req.params.courseId, limit: null, used: 0, remaining: null });
+    }
+
     if (error?.status) {
       return sendApiError(res, error.status, String(error.message || 'INTERNAL_ERROR'), { details: error.details });
     }

@@ -3,12 +3,25 @@ import supabaseAdmin from './supabaseAdmin.js';
 const normalizeId = (value) => String(value || '').trim();
 
 // Backend-side cache to reduce database load
-const QUOTA_CACHE_TTL_MS = 3000; // 3 seconds
+const QUOTA_CACHE_TTL_MS = 10000; // 10 seconds
+const QUOTA_STALE_CACHE_TTL_MS = 60000; // 1 minute for stale cache
+const QUOTA_TIMEOUT_MS = 5000; // 5 seconds timeout
 const quotaCache = new Map();
+const staleQuotaCache = new Map(); // Fallback cache for timeouts
 const inFlightQueries = new Map();
 
 function getCacheKey(userId, courseId) {
   return `${userId}:${courseId}`;
+}
+
+// Promise timeout helper
+function withTimeout(promise, timeoutMs, errorMessage) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(errorMessage)), timeoutMs)
+    ),
+  ]);
 }
 
 const isMissingColumnError = (error, columnName) => {
@@ -68,7 +81,12 @@ async function fetchCourseLimit(courseId) {
   const id = normalizeId(courseId);
   if (!id) throw Object.assign(new Error('INVALID_REQUEST'), { status: 400 });
 
-  const result = await supabaseAdmin.from('courses').select('id,llm_limit').eq('id', id).maybeSingle();
+  const result = await withTimeout(
+    supabaseAdmin.from('courses').select('id,llm_limit').eq('id', id).maybeSingle(),
+    QUOTA_TIMEOUT_MS,
+    'COURSE_LIMIT_FETCH_TIMEOUT'
+  );
+
   if (result.error) {
     if (isMissingColumnError(result.error, 'llm_limit')) {
       return { courseId: id, limit: null };
@@ -88,12 +106,16 @@ async function fetchQuotaRow(userId, courseId) {
   if (!uid || !cid) throw Object.assign(new Error('INVALID_REQUEST'), { status: 400 });
 
   const baseQuery = (selectFields) =>
-    supabaseAdmin
-      .from('llm_course_quota')
-      .select(selectFields)
-      .eq('user_id', uid)
-      .eq('course_id', cid)
-      .maybeSingle();
+    withTimeout(
+      supabaseAdmin
+        .from('llm_course_quota')
+        .select(selectFields)
+        .eq('user_id', uid)
+        .eq('course_id', cid)
+        .maybeSingle(),
+      QUOTA_TIMEOUT_MS,
+      'QUOTA_ROW_FETCH_TIMEOUT'
+    );
 
   let result = await baseQuery('user_id,course_id,used,limit,updated_at');
   if (result.error && isMissingFieldError(result.error, 'limit')) {
@@ -137,12 +159,20 @@ async function ensureQuotaRow(userId, courseId, limit) {
       updated_at: nowIso,
     };
 
-    let insert = await supabaseAdmin
-      .from('llm_course_quota')
-      .insert({ ...payloadBase, limit: limit == null ? null : Math.max(0, limit) });
+    let insert = await withTimeout(
+      supabaseAdmin
+        .from('llm_course_quota')
+        .insert({ ...payloadBase, limit: limit == null ? null : Math.max(0, limit) }),
+      QUOTA_TIMEOUT_MS,
+      'QUOTA_INSERT_TIMEOUT'
+    );
 
     if (insert.error && isMissingFieldError(insert.error, 'limit')) {
-      insert = await supabaseAdmin.from('llm_course_quota').insert(payloadBase);
+      insert = await withTimeout(
+        supabaseAdmin.from('llm_course_quota').insert(payloadBase),
+        QUOTA_TIMEOUT_MS,
+        'QUOTA_INSERT_TIMEOUT'
+      );
     }
 
     if (insert.error) {
@@ -158,11 +188,15 @@ async function ensureQuotaRow(userId, courseId, limit) {
   // Запись существует - обновляем только limit, если нужно (НЕ трогаем used!)
   if (limit != null && existing.limit != null && existing.limit !== limit) {
     const nowIsoUpdate = new Date().toISOString();
-    const update = await supabaseAdmin
-      .from('llm_course_quota')
-      .update({ limit, updated_at: nowIsoUpdate })
-      .eq('user_id', uid)
-      .eq('course_id', cid);
+    const update = await withTimeout(
+      supabaseAdmin
+        .from('llm_course_quota')
+        .update({ limit, updated_at: nowIsoUpdate })
+        .eq('user_id', uid)
+        .eq('course_id', cid),
+      QUOTA_TIMEOUT_MS,
+      'QUOTA_UPDATE_TIMEOUT'
+    );
 
     if (update.error && !isMissingFieldError(update.error, 'limit')) {
       throw Object.assign(new Error('FAILED_TO_UPDATE_COURSE_QUOTA'), { status: 500, details: update.error });
@@ -207,7 +241,7 @@ export async function getCourseQuota({ userId, courseId }) {
   const cid = normalizeId(courseId);
   const cacheKey = getCacheKey(uid, cid);
 
-  // Check cache
+  // Check fresh cache
   const cached = quotaCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) {
     return cached.value;
@@ -223,7 +257,19 @@ export async function getCourseQuota({ userId, courseId }) {
     try {
       const result = await getCourseQuotaUncached({ userId: uid, courseId: cid });
       quotaCache.set(cacheKey, { expiresAt: Date.now() + QUOTA_CACHE_TTL_MS, value: result });
+      staleQuotaCache.set(cacheKey, { expiresAt: Date.now() + QUOTA_STALE_CACHE_TTL_MS, value: result });
       return result;
+    } catch (error) {
+      // При таймауте или ошибке БД - возвращаем stale cache если есть
+      if (error.message && (error.message.includes('TIMEOUT') || error.message.includes('FAILED_TO_FETCH'))) {
+        const stale = staleQuotaCache.get(cacheKey);
+        if (stale && stale.expiresAt > Date.now()) {
+          console.warn('[quota] Using stale cache due to timeout', { userId: uid, courseId: cid });
+          return stale.value;
+        }
+      }
+      // Нет stale cache - пробрасываем ошибку
+      throw error;
     } finally {
       if (inFlightQueries.get(cacheKey) === promise) {
         inFlightQueries.delete(cacheKey);
@@ -263,14 +309,18 @@ export async function consumeCourseQuota({ userId, courseId, amount = 1 }) {
     }
 
     const nowIso = new Date().toISOString();
-    const update = await supabaseAdmin
-      .from('llm_course_quota')
-      .update({ used: used + delta, updated_at: nowIso })
-      .eq('user_id', uid)
-      .eq('course_id', cid)
-      .eq('used', used)
-      .select('used')
-      .maybeSingle();
+    const update = await withTimeout(
+      supabaseAdmin
+        .from('llm_course_quota')
+        .update({ used: used + delta, updated_at: nowIso })
+        .eq('user_id', uid)
+        .eq('course_id', cid)
+        .eq('used', used)
+        .select('used')
+        .maybeSingle(),
+      QUOTA_TIMEOUT_MS,
+      'QUOTA_CONSUME_TIMEOUT'
+    );
 
     if (update.error) {
       throw Object.assign(new Error('FAILED_TO_CONSUME_COURSE_QUOTA'), { status: 500, details: update.error });
@@ -288,9 +338,10 @@ export async function consumeCourseQuota({ userId, courseId, amount = 1 }) {
       remaining: computeRemaining(limit, nextUsed),
     };
 
-    // Invalidate cache after consuming quota
+    // Invalidate fresh cache but update stale cache
     const cacheKey = getCacheKey(uid, cid);
     quotaCache.delete(cacheKey);
+    staleQuotaCache.set(cacheKey, { expiresAt: Date.now() + QUOTA_STALE_CACHE_TTL_MS, value: result });
 
     return result;
   }
