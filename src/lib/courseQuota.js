@@ -2,6 +2,15 @@ import supabaseAdmin from './supabaseAdmin.js';
 
 const normalizeId = (value) => String(value || '').trim();
 
+// Backend-side cache to reduce database load
+const QUOTA_CACHE_TTL_MS = 3000; // 3 seconds
+const quotaCache = new Map();
+const inFlightQueries = new Map();
+
+function getCacheKey(userId, courseId) {
+  return `${userId}:${courseId}`;
+}
+
 const isMissingColumnError = (error, columnName) => {
   const message = error && typeof error === 'object' && 'message' in error ? String(error.message) : '';
   return (
@@ -115,52 +124,51 @@ async function ensureQuotaRow(userId, courseId, limit) {
   const cid = normalizeId(courseId);
   if (!uid || !cid) throw Object.assign(new Error('INVALID_REQUEST'), { status: 400 });
 
-  const existing = await fetchQuotaRow(uid, cid);
-  if (!existing) {
-    const nowIso = new Date().toISOString();
-    const payloadBase = {
-      user_id: uid,
-      course_id: cid,
-      used: 0,
-      updated_at: nowIso,
-    };
+  const nowIso = new Date().toISOString();
+  const payloadBase = {
+    user_id: uid,
+    course_id: cid,
+    used: 0,
+    updated_at: nowIso,
+  };
 
-    // Prefer writing per-row limit, but tolerate missing column.
-    let insert = await supabaseAdmin
+  // Use upsert with RETURNING to reduce queries from 3 to 1
+  let upsert = await supabaseAdmin
+    .from('llm_course_quota')
+    .upsert(
+      { ...payloadBase, limit: limit == null ? null : Math.max(0, limit) },
+      { onConflict: 'user_id,course_id', ignoreDuplicates: false }
+    )
+    .select('user_id,course_id,used,limit,updated_at')
+    .maybeSingle();
+
+  // Fallback for older schema without per-row limit column
+  if (upsert.error && isMissingFieldError(upsert.error, 'limit')) {
+    upsert = await supabaseAdmin
       .from('llm_course_quota')
-      .insert({ ...payloadBase, limit: limit == null ? null : Math.max(0, limit) });
-
-    if (insert.error && isMissingFieldError(insert.error, 'limit')) {
-      insert = await supabaseAdmin.from('llm_course_quota').insert(payloadBase);
-    }
-
-    if (insert.error) {
-      throw Object.assign(new Error('FAILED_TO_CREATE_COURSE_QUOTA'), { status: 500, details: insert.error });
-    }
-  } else if (limit != null && existing.limit != null && existing.limit !== limit) {
-    // Only sync per-row limit when the column exists (existing.limit != null)
-    const nowIsoUpdate = new Date().toISOString();
-    const update = await supabaseAdmin
-      .from('llm_course_quota')
-      .update({ limit, updated_at: nowIsoUpdate })
-      .eq('user_id', uid)
-      .eq('course_id', cid);
-
-    if (update.error) {
-      if (isMissingFieldError(update.error, 'limit')) {
-        // Older schema without per-row limit; ignore.
-      } else {
-        throw Object.assign(new Error('FAILED_TO_UPDATE_COURSE_QUOTA'), { status: 500, details: update.error });
-      }
-    }
+      .upsert(payloadBase, { onConflict: 'user_id,course_id', ignoreDuplicates: false })
+      .select('user_id,course_id,used,updated_at')
+      .maybeSingle();
   }
 
-  const row = await fetchQuotaRow(uid, cid);
-  if (!row) throw Object.assign(new Error('FAILED_TO_FETCH_COURSE_QUOTA'), { status: 500 });
-  return row;
+  if (upsert.error) {
+    throw Object.assign(new Error('FAILED_TO_UPSERT_COURSE_QUOTA'), { status: 500, details: upsert.error });
+  }
+
+  if (!upsert.data) {
+    throw Object.assign(new Error('FAILED_TO_FETCH_COURSE_QUOTA'), { status: 500 });
+  }
+
+  return {
+    user_id: uid,
+    course_id: cid,
+    used: toIntOrNull(upsert.data.used) ?? 0,
+    limit: 'limit' in upsert.data ? toIntOrNull(upsert.data.limit) : null,
+    updated_at: upsert.data.updated_at,
+  };
 }
 
-export async function getCourseQuota({ userId, courseId }) {
+async function getCourseQuotaUncached({ userId, courseId }) {
   const uid = normalizeId(userId);
   const cid = normalizeId(courseId);
   if (!uid || !cid) throw Object.assign(new Error('INVALID_REQUEST'), { status: 400 });
@@ -182,6 +190,39 @@ export async function getCourseQuota({ userId, courseId }) {
     used,
     remaining: computeRemaining(effectiveLimit, used),
   };
+}
+
+export async function getCourseQuota({ userId, courseId }) {
+  const uid = normalizeId(userId);
+  const cid = normalizeId(courseId);
+  const cacheKey = getCacheKey(uid, cid);
+
+  // Check cache
+  const cached = quotaCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.value;
+  }
+
+  // Deduplicate concurrent requests
+  const existingPromise = inFlightQueries.get(cacheKey);
+  if (existingPromise) {
+    return existingPromise;
+  }
+
+  const promise = (async () => {
+    try {
+      const result = await getCourseQuotaUncached({ userId: uid, courseId: cid });
+      quotaCache.set(cacheKey, { expiresAt: Date.now() + QUOTA_CACHE_TTL_MS, value: result });
+      return result;
+    } finally {
+      if (inFlightQueries.get(cacheKey) === promise) {
+        inFlightQueries.delete(cacheKey);
+      }
+    }
+  })();
+
+  inFlightQueries.set(cacheKey, promise);
+  return promise;
 }
 
 export async function consumeCourseQuota({ userId, courseId, amount = 1 }) {
@@ -229,13 +270,19 @@ export async function consumeCourseQuota({ userId, courseId, amount = 1 }) {
     if (!update.data) continue;
 
     const nextUsed = toIntOrNull(update.data.used) ?? used + delta;
-    return {
+    const result = {
       userId: uid,
       courseId: cid,
       limit,
       used: nextUsed,
       remaining: computeRemaining(limit, nextUsed),
     };
+
+    // Invalidate cache after consuming quota
+    const cacheKey = getCacheKey(uid, cid);
+    quotaCache.delete(cacheKey);
+
+    return result;
   }
 
   throw Object.assign(new Error('COURSE_QUOTA_CONFLICT'), { status: 409 });
