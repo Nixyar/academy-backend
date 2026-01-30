@@ -49,30 +49,17 @@ const setAuthCookies = (res, session) => {
   }
 };
 
-router.post('/session', (req, res, next) => {
-  try {
-    console.log('[/session] Request body:', {
-      hasAccessToken: !!req.body?.access_token,
-      hasRefreshToken: !!req.body?.refresh_token
-    });
+router.post('/session', (req, res) => {
+  const { access_token: accessToken, refresh_token: refreshToken } = req.body || {};
 
-    const { access_token: accessToken, refresh_token: refreshToken } = req.body || {};
-
-    if (!accessToken || !refreshToken) {
-      console.log('[/session] Missing tokens');
-      return sendApiError(res, 400, 'INVALID_REQUEST');
-    }
-
-    console.log('[/session] Setting cookies...');
-    res.cookie('sb_access_token', accessToken, cookieOptions(ACCESS_MAX_AGE_MS));
-    res.cookie('sb_refresh_token', refreshToken, cookieOptions(REFRESH_MAX_AGE_MS));
-
-    console.log('[/session] Success');
-    return res.json({ ok: true });
-  } catch (error) {
-    console.error('[/session] Error:', error);
-    return next(error);
+  if (!accessToken || !refreshToken) {
+    return sendApiError(res, 400, 'INVALID_REQUEST');
   }
+
+  res.cookie('sb_access_token', accessToken, cookieOptions(ACCESS_MAX_AGE_MS));
+  res.cookie('sb_refresh_token', refreshToken, cookieOptions(REFRESH_MAX_AGE_MS));
+
+  return res.json({ ok: true });
 });
 
 router.post('/login', async (req, res) => {
