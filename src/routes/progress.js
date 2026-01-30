@@ -201,6 +201,30 @@ const applyPatch = (progress, patch) => {
     };
   }
 
+  if (op === 'course_feedback') {
+    const { rating, comment } = patch;
+    const numericRating = typeof rating === 'number' ? rating : Number(rating);
+
+    if (!Number.isFinite(numericRating) || numericRating <= 0) {
+      return { error: 'INVALID_PATCH', details: 'course_feedback requires rating > 0' };
+    }
+
+    const trimmedComment = typeof comment === 'string' ? comment.trim() : '';
+    const now = patch.updatedAt || new Date().toISOString();
+    const feedback = {
+      rating: numericRating,
+      comment: trimmedComment || null,
+      updated_at: now,
+    };
+
+    return {
+      progress: {
+        ...next,
+        feedback,
+      },
+    };
+  }
+
   if (op === 'finish_course') {
     const { lessonId } = patch;
 

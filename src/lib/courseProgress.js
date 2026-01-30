@@ -48,6 +48,16 @@ const normalizeActiveJob = (activeJob) => {
   const lessonId = activeJob.lessonId || activeJob.lesson_id || null;
   const courseId = activeJob.courseId || activeJob.course_id || null;
   const status = activeJob.status || activeJob.state || null;
+  const statusMessage =
+    typeof activeJob.status_message === 'string'
+      ? activeJob.status_message
+      : (typeof activeJob.statusMessage === 'string' ? activeJob.statusMessage : null);
+  const progressValue =
+    typeof activeJob.progress === 'number'
+      ? activeJob.progress
+      : (typeof activeJob.progress === 'string' && activeJob.progress.trim()
+        ? Number(activeJob.progress)
+        : null);
   const error =
     typeof activeJob.error === 'string'
       ? activeJob.error
@@ -59,17 +69,21 @@ const normalizeActiveJob = (activeJob) => {
   const lastUpdatedByLessonId =
     activeJob.lastUpdatedByLessonId || activeJob.last_updated_by_lesson_id || null;
 
+  const isFailed = status === 'failed';
+
   return {
     jobId,
     lessonId,
     courseId,
     status,
+    status_message: statusMessage,
+    progress: Number.isFinite(progressValue) ? progressValue : null,
     prompt: typeof activeJob.prompt === 'string' ? activeJob.prompt : null,
     startedAt: activeJob.startedAt || activeJob.started_at || null,
     updatedAt: activeJob.updatedAt || activeJob.updated_at || activeJob.heartbeat_at || null,
     lastEventId: activeJob.lastEventId || activeJob.last_event_id || null,
-    error,
-    error_details: errorDetails,
+    error: isFailed ? error : null,
+    error_details: isFailed ? errorDetails : null,
     last_updated_by_lesson_id: lastUpdatedByLessonId,
   };
 };
