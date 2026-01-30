@@ -33,7 +33,12 @@ app.use(helmet({
 const corsAllowlist = env.webOrigins.map((origin) => origin.trim());
 
 const isAllowedOrigin = (origin) => {
-  if (!origin) return false; // Блокировать запросы без Origin
+  // В development разрешаем запросы без Origin (например, от прокси)
+  if (!origin && env.nodeEnv === 'development') {
+    return true;
+  }
+
+  if (!origin) return false; // Блокировать запросы без Origin в production
 
   const normalized = origin.trim();
   if (corsAllowlist.includes(normalized)) return true;
