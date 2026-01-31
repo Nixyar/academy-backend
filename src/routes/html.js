@@ -1192,6 +1192,7 @@ router.post('/start', requireUser, async (req, res, next) => {
   const startedAt = Date.now();
   try {
     const body = req.body || {};
+    const hasModeInBody = typeof body.mode === 'string' && body.mode.trim().length > 0;
     const mode = normalizeMode(body.mode);
     const lessonId = typeof body.lessonId === 'string' ? body.lessonId.trim() : '';
     const requestedCourseId = typeof body.courseId === 'string' ? body.courseId.trim() : '';
@@ -1221,7 +1222,9 @@ router.post('/start', requireUser, async (req, res, next) => {
         lessonData.lesson?.settings_mode;
       const normalizedLessonMode = normalizeMode(rawLessonMode);
       const resolvedMode =
-        ['create', 'edit', 'add_page', 'text'].includes(normalizedLessonMode) ? normalizedLessonMode : mode;
+        !hasModeInBody && ['create', 'edit', 'add_page', 'text'].includes(normalizedLessonMode)
+          ? normalizedLessonMode
+          : mode;
       if (resolvedMode === 'create' && requestedCourseId && requestedCourseId !== derivedCourseId) {
         return sendApiError(res, 400, 'COURSE_ID_MISMATCH');
       }
