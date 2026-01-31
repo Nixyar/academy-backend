@@ -90,7 +90,7 @@ const normalizeActiveJob = (activeJob) => {
 
 export const normalizeProgress = (progress) => {
   if (!progress || typeof progress !== 'object' || Array.isArray(progress)) {
-    return { lessons: {}, result: { html: null, meta: {} }, active_job: null };
+    return { lessons: {}, result: { html: null, text: null, meta: {} }, active_job: null };
   }
 
   const resultRaw =
@@ -111,6 +111,7 @@ export const normalizeProgress = (progress) => {
   const normalizedResult = progress.result && typeof progress.result === 'object' && !Array.isArray(progress.result)
     ? {
       html: resultRaw?.html ?? null,
+      text: resultRaw?.text ?? null,
       files: normalizeFiles(resultRaw?.files) ?? undefined,
       active_file:
         typeof resultRaw?.active_file === 'string'
@@ -120,7 +121,7 @@ export const normalizeProgress = (progress) => {
         ? { ...resultRaw.meta }
         : {},
     }
-    : { html: null, meta: {} };
+    : { html: null, text: null, meta: {} };
 
   return {
     ...progress,

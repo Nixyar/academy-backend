@@ -794,6 +794,7 @@ const ensureJob = (jobId, init) => {
     css: null,
     sections: {},
     html: null,
+    text: null,
     renderSystem: null,
     sectionOrder: [],
     sectionSpecs: {},
@@ -1039,6 +1040,7 @@ const completeActiveJob = async (job, status, result = {}) => {
       result: {
         ...baseResult,
         html: result.html ?? baseResult.html ?? null,
+        text: result.text ?? baseResult.text ?? null,
         files: files ?? baseResult.files,
         active_file: activeFile ?? baseResult.active_file,
         meta: { ...(baseResult.meta || {}), ...meta },
@@ -1199,7 +1201,7 @@ router.post('/start', requireUser, async (req, res, next) => {
         : (typeof body.prompt === 'string' ? body.prompt.trim() : '');
     const { user } = req;
 
-    if (!['create', 'edit', 'add_page'].includes(mode)) {
+    if (!['create', 'edit', 'add_page', 'text'].includes(mode)) {
       return sendApiError(res, 400, 'INVALID_MODE');
     }
 
@@ -1212,16 +1214,29 @@ router.post('/start', requireUser, async (req, res, next) => {
       // Fetch lesson once and reuse it
       lessonData = await fetchLessonPrompts(lessonId);
       const derivedCourseId = lessonData.lesson.course_id;
-      if (mode === 'create' && requestedCourseId && requestedCourseId !== derivedCourseId) {
+      const lessonSettings = parseLessonSettings(lessonData.lesson);
+      const rawLessonMode =
+        lessonSettings?.mode ??
+        lessonData.lesson?.mode ??
+        lessonData.lesson?.settings_mode;
+      const normalizedLessonMode = normalizeMode(rawLessonMode);
+      const resolvedMode =
+        ['create', 'edit', 'add_page', 'text'].includes(normalizedLessonMode) ? normalizedLessonMode : mode;
+      if (resolvedMode === 'create' && requestedCourseId && requestedCourseId !== derivedCourseId) {
         return sendApiError(res, 400, 'COURSE_ID_MISMATCH');
+      }
+      // Use lesson-defined mode when present (e.g., text mode configured in settings).
+      if (resolvedMode !== mode) {
+        req.body = { ...(req.body || {}), mode: resolvedMode };
       }
     } else if (mode === 'create') {
       return sendApiError(res, 400, 'INVALID_REQUEST');
     }
 
+    const resolvedMode = normalizeMode(req.body?.mode ?? mode);
     const { jobId, quota } = await enqueueJob({
       userId: user.id,
-      mode,
+      mode: resolvedMode,
       courseId: requestedCourseId || lessonData?.lesson?.course_id || null,
       lessonId,
       instruction,
@@ -1820,6 +1835,38 @@ const runAddPageJob = async (job) => {
   broadcastSse(job, 'done', { type: 'done', ...job.result });
 };
 
+const runTextJob = async (job) => {
+  const lessonData = job.lessonId
+    ? await fetchLessonPrompts(job.lessonId, { requirePlan: false, requireRender: false })
+    : null;
+  const system =
+    (lessonData?.renderSystem && lessonData.renderSystem.trim()) ||
+    (lessonData?.planSystem && lessonData.planSystem.trim()) ||
+    '';
+
+  emitStatus(job, 'status', 'Генерируем ответ...', 0.2);
+
+  const text = await callLlm({
+    system,
+    prompt: job.instruction,
+    temperature: 0.5,
+    maxTokens: 4096,
+  });
+
+  const cleaned = String(text || '').trim();
+  job.text = cleaned;
+
+  await completeActiveJob(job, 'done', {
+    text: cleaned,
+    meta: { text_length: cleaned.length },
+  });
+
+  job.result = { text: cleaned, mode: 'text' };
+  job.status = 'done';
+  emitStatus(job, 'done', 'done', 1);
+  broadcastSse(job, 'done', { type: 'done', mode: 'text', text: cleaned });
+};
+
 const startJobRunner = (job, debugMode = false) => {
   if (!job || job.started) return;
   job.started = true;
@@ -1833,6 +1880,7 @@ const startJobRunner = (job, debugMode = false) => {
       if (job.mode === 'create') await runCreateJob(job, debugMode);
       else if (job.mode === 'edit') await runEditJob(job);
       else if (job.mode === 'add_page') await runAddPageJob(job);
+      else if (job.mode === 'text') await runTextJob(job);
       else throw new Error('INVALID_MODE');
     } catch (err) {
       await failJob(job, err);
@@ -1882,6 +1930,9 @@ router.get('/stream', requireUser, async (req, res, next) => {
         job.debug.forEach((entry) => sendSse(res, 'debug', entry));
       }
     }
+    if (job.mode === 'text') {
+      if (job.text) sendSse(res, 'text', { type: 'text', text: job.text });
+    }
 
     if (job.status === 'done') {
       sendSse(res, 'done', { type: 'done', ...(job.result || {}) });
@@ -1923,6 +1974,8 @@ router.get('/result', requireUser, (req, res) => {
     css: job.css,
     sections: job.sections,
     html: job.html,
+    text: job.text,
+    mode: job.mode,
     debug: debugMode ? job.debug || [] : undefined,
   });
 });
