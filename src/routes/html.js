@@ -1849,9 +1849,46 @@ const runTextJob = async (job) => {
 
   emitStatus(job, 'status', 'Генерируем ответ...', 0.2);
 
+  let prompt = job.instruction;
+  try {
+    if (job.lessonId) {
+      const { progress } = await loadCourseProgress(job.userId, job.courseId);
+      const lessonNode =
+        progress?.lessons && typeof progress.lessons === 'object' && !Array.isArray(progress.lessons)
+          ? progress.lessons[job.lessonId]
+          : null;
+      const lastPrompt =
+        lessonNode && typeof lessonNode === 'object' && typeof lessonNode.lesson_prompt === 'string'
+          ? lessonNode.lesson_prompt
+          : null;
+      const lastText =
+        lessonNode && typeof lessonNode === 'object' && lessonNode.result && typeof lessonNode.result === 'object'
+          ? (typeof lessonNode.result.text === 'string' ? lessonNode.result.text : null)
+          : (progress?.result && typeof progress.result === 'object' && typeof progress.result.text === 'string'
+            ? progress.result.text
+            : null);
+
+      if (lastPrompt && lastText) {
+        const maxChars = 1200;
+        const promptSnippet = lastPrompt.trim().slice(0, 360);
+        const answerSnippet = lastText.trim().slice(0, maxChars);
+        prompt = [
+          'КОНТЕКСТ ПРЕДЫДУЩЕГО ОТВЕТА (кратко):',
+          `Пользователь: ${promptSnippet}`,
+          `Ассистент: ${answerSnippet}`,
+          '---',
+          'Новый запрос пользователя:',
+          job.instruction,
+        ].join('\n');
+      }
+    }
+  } catch {
+    // If context read fails, proceed without it.
+  }
+
   const text = await callLlm({
     system,
-    prompt: job.instruction,
+    prompt,
     temperature: 0.5,
     maxTokens: 4096,
   });
@@ -1868,6 +1905,32 @@ const runTextJob = async (job) => {
   job.status = 'done';
   emitStatus(job, 'done', 'done', 1);
   broadcastSse(job, 'done', { type: 'done', mode: 'text', text: cleaned });
+
+  if (job.lessonId) {
+    try {
+      await mutateCourseProgress(job.userId, job.courseId, (progress) => {
+        const next = progress && typeof progress === 'object' && !Array.isArray(progress) ? { ...progress } : {};
+        const lessons = next.lessons && typeof next.lessons === 'object' && !Array.isArray(next.lessons)
+          ? { ...next.lessons }
+          : {};
+        const lesson = lessons[job.lessonId] && typeof lessons[job.lessonId] === 'object'
+          ? { ...lessons[job.lessonId] }
+          : {};
+        const lessonResult =
+          lesson.result && typeof lesson.result === 'object' && !Array.isArray(lesson.result)
+            ? { ...lesson.result }
+            : {};
+        lessonResult.text = cleaned;
+        lesson.result = lessonResult;
+        lesson.lesson_prompt = job.instruction;
+        lessons[job.lessonId] = lesson;
+        next.lessons = lessons;
+        return next;
+      });
+    } catch {
+      // Best-effort persistence for per-lesson context.
+    }
+  }
 };
 
 const startJobRunner = (job, debugMode = false) => {
