@@ -1,5 +1,7 @@
 import supabaseAdmin from './supabaseAdmin.js';
 
+const DISABLE_COURSE_QUOTA = true;
+
 const normalizeId = (value) => String(value || '').trim();
 
 // Backend-side cache to reduce database load
@@ -80,6 +82,10 @@ const computeRemaining = (limit, used) => {
 async function fetchCourseLimit(courseId) {
   const id = normalizeId(courseId);
   if (!id) throw Object.assign(new Error('INVALID_REQUEST'), { status: 400 });
+
+  if (DISABLE_COURSE_QUOTA) {
+    return { courseId: id, limit: null };
+  }
 
   const result = await withTimeout(
     supabaseAdmin.from('courses').select('id,llm_limit').eq('id', id).maybeSingle(),

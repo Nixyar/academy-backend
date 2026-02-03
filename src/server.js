@@ -1,7 +1,6 @@
 import express from 'express';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
-import rateLimit from 'express-rate-limit';
 import helmet from 'helmet';
 import env from './config/env.js';
 import authRouter from './routes/auth.js';
@@ -95,52 +94,19 @@ app.use((req, res, next) => {
 app.use(express.json());
 app.use(cookieParser());
 
-// Global rate limit
-const globalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 min
-  max: 100, // 100 requests per IP
-  standardHeaders: true,
-  legacyHeaders: false,
-  handler: (req, res) => {
-    res.status(429).json({
-      error: 'TOO_MANY_REQUESTS',
-      message: 'Слишком много запросов. Попробуйте позже.',
-    });
-  },
-});
-
-// Strict limiter for auth endpoints
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 5, // 5 attempts per 15 min
-  skipSuccessfulRequests: true,
-});
-
-// LLM endpoint limiter
-const llmLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 30, // 30 LLM requests per 15 min
-});
-
-app.use('/api', globalLimiter);
-
 const api = express.Router();
 
 api.get('/health', (req, res) => {
   res.json({ ok: true });
 });
 
-api.use('/auth/login', authLimiter);
-api.use('/auth/register', authLimiter);
 api.use('/auth', authRouter);
 api.use('/me', meRouter);
 api.use('/feedback', feedbackRouter);
 api.use('/purchases', purchasesRouter);
 api.use('/payments', paymentsRouter);
 api.use('/lessons', lessonContentRouter);
-api.use('/lessons', llmLimiter);
 api.use('/lessons', llmRouter);
-api.use('/v1/html', llmLimiter);
 api.use('/v1/html', htmlRouter);
 api.use('/', progressRouter);
 api.use('/courses', coursesRouter);
