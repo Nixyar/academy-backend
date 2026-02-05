@@ -1098,7 +1098,7 @@ const normalizeMode = (value) => {
   return raw;
 };
 
-const enqueueJob = async ({ userId, mode, courseId, lessonId, instruction, lessonData }) => {
+const enqueueJob = async ({ userId, mode, courseId, lessonId, instruction, lessonData, retryOfJobId }) => {
   let resolvedCourseId = courseId;
   let resolvedLessonId = lessonId || null;
 
@@ -1119,7 +1119,7 @@ const enqueueJob = async ({ userId, mode, courseId, lessonId, instruction, lesso
   const existingJob = activeJob?.jobId ? jobs.get(activeJob.jobId) : null;
   const lastHeartbeat = getLastHeartbeat(activeJob, progressUpdatedAt);
 
-  // A job is stale if it says it's running but hasn't updated in 5m OR isn't in memory
+  // A job is stale if it says it's running but hasn't updated in 15m OR isn't in memory
   const isStale =
     isActiveJobRunning(activeJob) &&
     (!lastHeartbeat || Date.now() - lastHeartbeat > ACTIVE_JOB_TTL_MS || !existingJob);
@@ -1135,7 +1135,23 @@ const enqueueJob = async ({ userId, mode, courseId, lessonId, instruction, lesso
     return { jobId: activeJob.jobId, already_running: true, courseId: resolvedCourseId, quota };
   }
 
-  const quota = await consumeCourseQuota({ userId, courseId: resolvedCourseId, amount: 1 });
+  let quota = null;
+  const canSkipQuota =
+    typeof retryOfJobId === 'string' &&
+    retryOfJobId.trim().length > 0 &&
+    activeJob?.status === 'failed' &&
+    activeJob?.error === 'STALE_HEARTBEAT' &&
+    activeJob?.jobId === retryOfJobId.trim();
+
+  if (canSkipQuota) {
+    try {
+      quota = await getCourseQuota({ userId, courseId: resolvedCourseId });
+    } catch {
+      quota = null;
+    }
+  } else {
+    quota = await consumeCourseQuota({ userId, courseId: resolvedCourseId, amount: 1 });
+  }
 
   const jobId = randomUUID();
   const nowIso = new Date().toISOString();
@@ -1200,6 +1216,10 @@ router.post('/start', requireUser, async (req, res, next) => {
       typeof body.instruction === 'string'
         ? body.instruction.trim()
         : (typeof body.prompt === 'string' ? body.prompt.trim() : '');
+    const retryOfJobId =
+      typeof body.retryOfJobId === 'string'
+        ? body.retryOfJobId.trim()
+        : (typeof body.retry_of_job_id === 'string' ? body.retry_of_job_id.trim() : '');
     const { user } = req;
 
     if (!['create', 'edit', 'add_page', 'text'].includes(mode)) {
@@ -1245,6 +1265,7 @@ router.post('/start', requireUser, async (req, res, next) => {
       instruction,
       // Pass the already fetched lesson data to avoid double fetch in enqueueJob
       lessonData,
+      retryOfJobId,
     });
     const job = jobs.get(jobId);
     if (job) startJobRunner(job, false);
